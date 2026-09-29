@@ -5,7 +5,7 @@ export type CodeModeSkill = {
   name: string;
   description: string;
   location: string;
-  source: Pick<Skill, "filePath" | "readContent">;
+  source: Pick<Skill, "filePath" | "readContent" | "fileHost">;
   reader?: CodeModeSkillReader;
 };
 
@@ -48,7 +48,11 @@ export function resolveCodeModeSkills(params: {
       name,
       description: [source.description, source.locationNote].filter(Boolean).join("\n"),
       location,
-      source: { filePath: source.filePath, readContent: source.readContent },
+      source: {
+        filePath: source.filePath,
+        readContent: source.readContent,
+        fileHost: source.fileHost,
+      },
       reader: params.reader,
     });
   }

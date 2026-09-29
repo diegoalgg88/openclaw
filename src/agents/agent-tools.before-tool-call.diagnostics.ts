@@ -41,6 +41,10 @@ import {
   resolveSkillTelemetrySource,
   resolveSkillTelemetrySourceValue,
 } from "../skills/loading/source.js";
+import {
+  isWorkspaceSkillReadPath,
+  resolveSkillReadPath,
+} from "../skills/loading/workspace-skill-read-path.js";
 import type { SkillSnapshot, SkillTelemetrySource } from "../skills/types.js";
 import { isPlainObject, truncateUtf16Safe } from "../utils.js";
 import { buildAdjustedParamsKey } from "./agent-tools.before-tool-call.state.js";
@@ -339,7 +343,7 @@ function resolveRelativeToolPath(candidate: string, ctx?: HookContext): string |
   if (!trimmed) {
     return undefined;
   }
-  if (trimmed.startsWith("node://")) {
+  if (trimmed.startsWith("node://") || isWorkspaceSkillReadPath(trimmed)) {
     return trimmed;
   }
   if (trimmed === "~") {
@@ -371,6 +375,12 @@ function findSkillInstructionMatch(
     }
     const filePath = typeof entry.filePath === "string" ? entry.filePath.trim() : "";
     const baseDir = typeof entry.baseDir === "string" ? entry.baseDir.trim() : "";
+    if (filePath && resolveSkillReadPath(entry) === candidate) {
+      return true;
+    }
+    if (entry.fileHost === "workspace") {
+      return false;
+    }
     return (
       (filePath &&
         (filePath.startsWith("node://")

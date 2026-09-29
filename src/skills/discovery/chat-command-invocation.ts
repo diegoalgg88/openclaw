@@ -13,7 +13,15 @@ export function skillCommandsToExplicitSelections(
   skills: readonly SkillCommandSpec[],
 ): ExplicitSkillSelection[] {
   return skills.flatMap((skill) =>
-    skill.skillFile ? [{ name: skill.name, path: skill.skillFile }] : [],
+    skill.skillFile
+      ? [
+          {
+            name: skill.name,
+            path: skill.skillFile,
+            ...(skill.skillFileHost ? { fileHost: skill.skillFileHost } : {}),
+          },
+        ]
+      : [],
   );
 }
 
@@ -22,7 +30,7 @@ export function mergeExplicitSkillSelections(
 ): ExplicitSkillSelection[] | undefined {
   const merged = new Map<string, ExplicitSkillSelection>();
   for (const selection of groups.flatMap((group) => group ?? [])) {
-    merged.set(`${selection.name}\0${selection.path}`, selection);
+    merged.set(`${selection.name}\0${selection.path}\0${selection.fileHost ?? ""}`, selection);
   }
   return merged.size > 0 ? [...merged.values()] : undefined;
 }

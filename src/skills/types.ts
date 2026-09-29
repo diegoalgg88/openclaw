@@ -64,6 +64,7 @@ export type SkillUsagePath = {
 export type ExplicitSkillSelection = {
   name: string;
   path: string;
+  fileHost?: "gateway" | "workspace";
 };
 
 export type SkillCommandSpec = {
@@ -72,6 +73,8 @@ export type SkillCommandSpec = {
   displayName?: string;
   /** Canonical SKILL.md path for file-scoped usage accounting. */
   skillFile?: string;
+  /** Host that owns skillFile. */
+  skillFileHost?: "gateway" | "workspace";
   skillName: string;
   description: string;
   /** Whether the model can resolve this skill from its available-skills prompt. */
@@ -125,7 +128,7 @@ export type SkillEligibilityContext = {
   };
 };
 
-export const WORKSPACE_SKILLS_PROMPT_FORMAT_VERSION = 6;
+export const WORKSPACE_SKILLS_PROMPT_FORMAT_VERSION = 8;
 
 export type SkillSnapshot = {
   librarySelections?: import("../../packages/gateway-protocol/src/schema/skill-library.js").SkillLibrarySelection[];
@@ -154,6 +157,7 @@ export type SkillSnapshot = {
   skillRoots?: {
     agentWorkspaceDir: string;
     executionWorkspaceDir: string;
+    executionWorkspaceFileHost?: "gateway";
   };
   version?: number;
   promptFormatVersion?: number;

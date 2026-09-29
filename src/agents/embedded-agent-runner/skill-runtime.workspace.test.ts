@@ -116,7 +116,9 @@ it("keeps Code Mode file ownership despite an unavailable same-name pin", async 
     expect(snapshot.resolvedSkills?.find((skill) => skill.name === "guide")?.fileHost).toBe(
       "workspace",
     );
-    expect(snapshot.prompt).toContain("<location>~/");
+    expect(snapshot.prompt).toContain(
+      "<location>workspace-skill://workspace/guide/SKILL.md</location>",
+    );
     const prepared = await prepareEmbeddedSkills({
       attempt: { config: {}, skillsSnapshot: snapshot },
       effectiveWorkspace: gateway,
@@ -258,7 +260,7 @@ it.each([
           resolvedSkills: [skill, { ...gatewaySkill, fileHost: "gateway" }],
         },
       }).find((tool) => tool.name === "read")!;
-      const target = path.join(skill.baseDir, fileName);
+      const target = `workspace-skill://workspace/guide/${fileName}`;
       expect(
         getTextContent(
           await read.execute("remote", {

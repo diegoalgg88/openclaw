@@ -203,6 +203,7 @@ function assembleWorkspaceSkillCommandSpecs(
       name: unique,
       displayName: entry.skill.displayName ?? rawName,
       skillFile: canonicalizePath(entry.skill.filePath),
+      skillFileHost: entry.skill.fileHost,
       skillName: rawName,
       description,
       modelVisible: isSkillPromptVisible(entry),

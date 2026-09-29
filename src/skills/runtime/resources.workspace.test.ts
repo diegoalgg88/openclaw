@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { registerAgentWorkspaceAccess } from "../../agents/workspace-access.js";
+import { skillCommandsToExplicitSelections } from "../discovery/chat-command-invocation.js";
 import type { Skill } from "../loading/skill-contract.js";
 import { loadWorkspaceSkills } from "../loading/workspace-skill-loader.js";
 import { buildSkillSnapshot } from "../loading/workspace-skill-prompt.js";
@@ -164,6 +165,59 @@ it("resolves explicit hidden Skills on the host before native catalog validation
     expect(f.skillResources.resolveExplicitSkill).toHaveBeenCalledWith(selected);
     expect(delivery?.skills.map((skill) => skill.name)).toEqual(["guide", "hidden"]);
     expect(delivery?.skills[1]).toMatchObject({ sourcePath: selected.path, modelVisible: true });
+  } finally {
+    f.release();
+  }
+});
+
+it("delivers the selected host's hidden Skill when both hosts use the same path", async () => {
+  const f = await fixture();
+  try {
+    for (const [root, text] of [
+      [f.gateway, "Gateway hidden resource"],
+      [f.host, "Node hidden resource"],
+    ] as const) {
+      const hidden = path.join(root, "skills", "hidden");
+      await fs.mkdir(hidden, { recursive: true });
+      await fs.writeFile(
+        path.join(hidden, "SKILL.md"),
+        `---\nname: hidden\ndescription: Hidden guide\ndisable-model-invocation: true\n---\n${text} instructions.\n`,
+      );
+      await fs.writeFile(path.join(hidden, "resource.txt"), text);
+    }
+    const selectedPath = path.join(f.gateway, "skills", "hidden", "SKILL.md");
+    f.snapshot.skills.push({ name: "hidden", gatewayFilePath: selectedPath }, { name: "hidden" });
+    const [selected] = skillCommandsToExplicitSelections([
+      {
+        name: "hidden",
+        skillName: "hidden",
+        description: "Hidden guide",
+        skillFile: selectedPath,
+        skillFileHost: "workspace",
+      },
+    ]);
+
+    const delivery = await prepareSkillResourceDelivery(
+      f.snapshot,
+      () => {},
+      [selected!],
+      f.gateway,
+    );
+    const materialized = await materializeSkillResources(delivery!, () => {});
+    try {
+      const hidden = materialized.snapshot.resolvedSkills!.find(
+        (skill) => skill.name === "hidden",
+      )!;
+      expect(await fs.readFile(hidden.filePath, "utf8")).toContain(
+        "Node hidden resource instructions.",
+      );
+      expect(await fs.readFile(path.join(hidden.baseDir, "resource.txt"), "utf8")).toBe(
+        "Node hidden resource",
+      );
+      expect(f.skillResources.resolveExplicitSkill).toHaveBeenCalledWith(selected);
+    } finally {
+      await materialized.cleanup();
+    }
   } finally {
     f.release();
   }

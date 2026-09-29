@@ -112,6 +112,13 @@ const localSkillResourceReader: SkillResourceSourceReader = {
   readSkillFiles: readSkillResourceFiles,
 };
 
+function matchesExplicitSelection(skill: Skill, selection: ExplicitSkillSelection): boolean {
+  return (
+    skill.filePath === selection.path &&
+    (selection.fileHost === undefined || skill.fileHost === selection.fileHost)
+  );
+}
+
 // The caller retains these bytes for its turn. Catalog versions do not version supporting files.
 export async function prepareSkillResourceDelivery(
   inputSnapshot: SkillSnapshot | undefined,
@@ -182,21 +189,25 @@ export async function prepareSkillResourceDelivery(
   for (const selected of explicitSelections) {
     if (
       selected.path.startsWith("node://") ||
-      candidates.some((skill) => skill.filePath === selected.path)
+      candidates.some((skill) => matchesExplicitSelection(skill, selected))
     ) {
       continue;
     }
     // Explicit references are host-resolved command paths, including eligible hidden skills.
     // Read only that directory; a resource turn must not repeat global skill discovery.
     const skillDir = path.dirname(selected.path);
-    const gatewayOwned = snapshot.skills.some((skill) => skill.gatewayFilePath === selected.path);
+    const fileHost =
+      selected.fileHost ??
+      (snapshot.skills.some((skill) => skill.gatewayFilePath === selected.path)
+        ? "gateway"
+        : "workspace");
     let loaded: Skill | null;
     try {
       loaded = await (
-        gatewayOwned ? localSkillResourceReader : getSourceReader()
+        fileHost === "gateway" ? localSkillResourceReader : getSourceReader()
       ).resolveExplicitSkill(selected);
       if (loaded) {
-        loaded = { ...loaded, fileHost: gatewayOwned ? "gateway" : "workspace" };
+        loaded = { ...loaded, fileHost };
       }
     } catch (error) {
       throw contextualizeSkillResourceError({ name: selected.name, baseDir: skillDir }, error);
@@ -205,7 +216,13 @@ export async function prepareSkillResourceDelivery(
     if (
       !loaded ||
       loaded.filePath !== selected.path ||
-      !snapshot.skills.some((skill) => skill.name === loaded.name) ||
+      !snapshot.skills.some(
+        (skill) =>
+          skill.name === loaded.name &&
+          (fileHost === "gateway"
+            ? skill.gatewayFilePath === selected.path
+            : skill.gatewayFilePath === undefined),
+      ) ||
       candidates.some((skill) => skill.name === loaded.name)
     ) {
       throw new Error(
@@ -232,8 +249,8 @@ export async function prepareSkillResourceDelivery(
       continue;
     }
     const pin = snapshot.librarySelections?.find((selection) => selection.name === skill.name);
-    const explicitlySelected = explicitSelections.some(
-      (selection) => selection.path === skill.filePath,
+    const explicitlySelected = explicitSelections.some((selection) =>
+      matchesExplicitSelection(skill, selection),
     );
     let files: SkillLibraryFile[] | null;
     try {
