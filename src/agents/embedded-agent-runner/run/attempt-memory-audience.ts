@@ -30,6 +30,8 @@ export async function resolveEmbeddedAttemptMemoryAudience(params: {
     assertMemoryAudienceSession(params.memoryAudience, params.sessionKey);
     return { memoryAudience: params.memoryAudience, release: retainedAudience };
   }
+  // Detached maintenance runs use their explicit delegation instead of deriving
+  // access from the maintenance copy's deliberately non-owner sender bit.
   if (!params.admission) {
     return { release: retainedAudience };
   }
