@@ -1,5 +1,6 @@
 import path from "node:path";
 import { optionalFiniteNumberSchema } from "openclaw/plugin-sdk/channel-actions";
+import type { MemoryCallerContext } from "openclaw/plugin-sdk/memory-host-search";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
 import { asNonArrayRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { textResult } from "openclaw/plugin-sdk/tool-results";
@@ -110,6 +111,7 @@ type WikiToolMemoryContext = {
   sandboxed?: boolean;
   conversationRecall?: OpenClawPluginToolContext["conversationRecall"];
   signal?: AbortSignal;
+  memoryContext?: MemoryCallerContext;
 };
 
 export function createWikiStatusTool(
@@ -155,6 +157,7 @@ export function createWikiSearchTool(
         agentSessionKey: memoryContext.agentSessionKey,
         sandboxed: memoryContext.sandboxed,
         conversationRecall: memoryContext.conversationRecall,
+        memoryContext: memoryContext.memoryContext,
         query: params.query,
         maxResults: params.maxResults,
         ...(params.backend ? { searchBackend: params.backend } : {}),
@@ -239,7 +242,7 @@ export function createWikiGetTool(
     name: "wiki_get",
     label: "Wiki Get",
     description:
-      "Read a wiki page by id or relative path, or fall back to the active memory corpus when shared search is enabled.",
+      "Read a wiki page by id or relative path, or use the opaque lookup returned by wiki_search for an active memory record.",
     parameters: WikiGetSchema,
     execute: async (_toolCallId, rawParams) => {
       const params = asNonArrayRecord(rawParams) as Partial<Static<typeof WikiGetSchema>>;
@@ -255,6 +258,7 @@ export function createWikiGetTool(
         agentSessionKey: memoryContext.agentSessionKey,
         sandboxed: memoryContext.sandboxed,
         conversationRecall: memoryContext.conversationRecall,
+        memoryContext: memoryContext.memoryContext,
         lookup,
         fromLine: params.fromLine,
         lineCount: params.lineCount,

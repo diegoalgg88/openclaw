@@ -1,10 +1,9 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
-  isAutomaticMemoryEntryEligible,
-  stripMemoryAnnotationCarriers,
-  type MemorySearchResult,
-} from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { getActiveMemorySearchManager } from "openclaw/plugin-sdk/memory-host-search";
+  getActiveMemoryProvider,
+  type MemoryCallerContext,
+  type MemorySearchHit,
+} from "openclaw/plugin-sdk/memory-host-search";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { buildPromptPrefix } from "./prompt.js";
 
@@ -19,7 +18,7 @@ const MAX_TRIGGER_CONTEXT_CHARS = 1800;
 const STRONG_TRIGGER_MATCH_SCORE = 0.65;
 const WORD_RE = /[\p{L}\p{N}_]+/gu;
 
-type TriggerRecallMatch = MemorySearchResult & { matchScore: number };
+type TriggerRecallMatch = MemorySearchHit & { matchScore: number };
 
 function normalizeWords(value: string): string[] {
   return (value.toLowerCase().match(WORD_RE) ?? []).filter((word) => word.length > 1);
@@ -32,7 +31,7 @@ function splitTriggerPhrases(value: string): string[] {
     .filter(Boolean);
 }
 
-function prepareTriggerScorer(message: string): (entry: MemorySearchResult) => number {
+function prepareTriggerScorer(message: string): (entry: MemorySearchHit) => number {
   let messageWordSet: Set<string> | undefined;
   const scorePhrase = (phrase: string): number => {
     const triggerWords = [...new Set(normalizeWords(phrase))];
@@ -51,43 +50,32 @@ function prepareTriggerScorer(message: string): (entry: MemorySearchResult) => n
     return coverage * 0.8 + Math.min(1, overlap / 2) * 0.2;
   };
   return (entry) => {
-    if (!entry.triggers) {
+    if (!entry.automaticRecall?.triggers) {
       return 0;
     }
-    const triggerScore = Math.max(0, ...splitTriggerPhrases(entry.triggers).map(scorePhrase));
-    const relevance = Math.max(0, Math.min(1, entry.score));
+    const triggerScore = Math.max(
+      0,
+      ...splitTriggerPhrases(entry.automaticRecall?.triggers).map(scorePhrase),
+    );
+    const relevance = Math.max(0, Math.min(1, entry.score ?? 0));
     return triggerScore * 0.8 + relevance * 0.2;
   };
 }
 
 function isPromotedTrustedMemoryEntry(
-  entry: Pick<MemorySearchResult, "provenance" | "projectKey" | "source">,
+  entry: MemorySearchHit,
   activeProjectKeys: readonly string[] = [],
 ): boolean {
-  if (entry.projectKey) {
-    const storedProjectKeys = [
-      ...new Set(
-        entry.projectKey
-          .split(";")
-          .map((key) => key.trim())
-          .filter(Boolean),
-      ),
-    ];
-    // A mixed chunk may contain content from every tagged project. Require all
-    // of them to be active so lane-1 can never leak a foreign project's content.
-    if (
-      storedProjectKeys.length === 0 ||
-      !storedProjectKeys.every((key) => activeProjectKeys.includes(key))
-    ) {
-      return false;
-    }
-  }
-  return entry.source === "memory" && isAutomaticMemoryEntryEligible(entry);
+  const projectKeys = entry.automaticRecall?.projectKeys;
+  return (
+    entry.automaticRecall?.eligible === true &&
+    (!projectKeys || projectKeys.every((key) => activeProjectKeys.includes(key)))
+  );
 }
 
 export function selectStrongTriggerMatches(
   message: string,
-  entries: MemorySearchResult[],
+  entries: MemorySearchHit[],
   activeProjectKeys: readonly string[] = [],
 ): TriggerRecallMatch[] {
   const scoreTriggerMatch = prepareTriggerScorer(message);
@@ -98,8 +86,11 @@ export function selectStrongTriggerMatches(
     .toSorted(
       (left, right) =>
         right.matchScore - left.matchScore ||
-        left.path.localeCompare(right.path) ||
-        left.startLine - right.startLine,
+        left.reference.providerId.localeCompare(right.reference.providerId) ||
+        left.reference.id.localeCompare(right.reference.id) ||
+        (left.reference.fragment ?? "").localeCompare(right.reference.fragment ?? "", undefined, {
+          numeric: true,
+        }),
     )
     .slice(0, TRIGGER_INJECTION_LIMIT);
 }
@@ -111,7 +102,7 @@ export function buildTriggerRecallContext(matches: TriggerRecallMatch[]): string
   const summary = matches
     .map(
       (entry) =>
-        `- ${stripMemoryAnnotationCarriers(entry.snippet).trim()} (Source: ${entry.path}#L${String(entry.startLine)})`,
+        `- ${entry.excerpt.trim()} (Source: ${entry.citations?.map((citation) => citation.label).join(", ") || `${entry.reference.providerId}:${entry.reference.id}`})`,
     )
     .join("\n");
   return buildPromptPrefix(truncateUtf16Safe(summary, MAX_TRIGGER_CONTEXT_CHARS));
@@ -120,6 +111,7 @@ export function buildTriggerRecallContext(matches: TriggerRecallMatch[]): string
 type TriggerLookupParams = {
   cfg: OpenClawConfig;
   agentId: string;
+  context: MemoryCallerContext;
   query: string;
   activeProjectKeys?: string[];
   signal?: AbortSignal;
@@ -133,7 +125,7 @@ type TriggerRecallRunEntry = {
   activeProjectKeys: string[];
   agentId: string;
   cfg: OpenClawConfig;
-  promise: Promise<MemorySearchResult[]>;
+  promise: Promise<MemorySearchHit[]>;
   query: string;
 };
 
@@ -142,42 +134,68 @@ const triggerRecallRuns = new Map<string, TriggerRecallRunEntry>();
 async function loadTriggerRecallCandidates(params: TriggerLookupParams) {
   params.signal?.throwIfAborted();
   const activeProjectKeys = params.activeProjectKeys ?? [];
+  params.context.assertCurrent();
   const lookup = await waitForTriggerLookup(
-    getActiveMemorySearchManager({
+    getActiveMemoryProvider({
       cfg: params.cfg,
       agentId: params.agentId,
+      context: {
+        ...params.context,
+        signal:
+          params.signal && params.context.signal
+            ? AbortSignal.any([params.signal, params.context.signal])
+            : (params.signal ?? params.context.signal),
+      },
     }),
     params.signal,
   );
-  if (!lookup.manager?.listTriggerCandidates) {
+  if (!lookup.provider) {
     return [];
   }
-  const lookupWork = Promise.all([
-    lookup.manager
-      .search(params.query, {
-        maxResults: TRIGGER_CANDIDATE_LIMIT,
-        minScore: 0,
-        sources: ["memory"],
-        signal: params.signal,
-        // Lane-1 runs on every eligible inbound message; it must stay
-        // deterministic and local, so query embedding is disabled.
-        lexicalOnly: true,
-        activeProjectKeys: [...activeProjectKeys],
-      })
-      .catch(() => []),
-    lookup.manager
-      .listTriggerCandidates({ activeProjectKeys: [...activeProjectKeys] })
-      .catch(() => []),
-  ]);
-  const [retrieved, triggerCandidates] = await waitForTriggerLookup(lookupWork, params.signal);
-  return [
-    ...new Map(
-      [...triggerCandidates, ...retrieved].map((entry) => [
-        `${entry.source}:${entry.path}:${String(entry.startLine)}:${String(entry.endLine)}`,
-        entry,
+  try {
+    if (
+      !lookup.provider.candidates ||
+      !lookup.provider.capabilities.candidates.includes("trigger")
+    ) {
+      return [];
+    }
+    const [retrieved, triggerCandidates] = await waitForTriggerLookup(
+      Promise.all([
+        lookup.provider
+          .search({
+            query: params.query,
+            maxResults: TRIGGER_CANDIDATE_LIMIT,
+            minScore: 0,
+            sources: ["memory"],
+            // Lane one stays local and deterministic; do not embed the query.
+            lexicalOnly: true,
+            activeProjectKeys: [...activeProjectKeys],
+          })
+          .catch(() => ({ hits: [] })),
+        lookup.provider
+          .candidates({ kind: "trigger", activeProjectKeys: [...activeProjectKeys] })
+          .catch(() => ({ hits: [] })),
       ]),
-    ).values(),
-  ];
+      params.signal,
+    );
+    params.context.assertCurrent();
+    const entries = new Map<string, MemorySearchHit>();
+    for (const entry of [...retrieved.hits, ...triggerCandidates.hits]) {
+      const key = JSON.stringify([
+        entry.reference.providerId,
+        entry.reference.id,
+        entry.reference.fragment,
+        entry.reference.revision,
+      ]);
+      const existing = entries.get(key);
+      if (!existing || entry.automaticRecall?.eligible === true) {
+        entries.set(key, entry);
+      }
+    }
+    return [...entries.values()];
+  } finally {
+    await lookup.provider.close();
+  }
 }
 
 function resolveTriggerRecallCandidates(params: TriggerLookupParams) {
@@ -218,11 +236,13 @@ export async function resolveTriggerRecall(
   params: TriggerLookupParams & { message: string },
 ): Promise<{ context?: string; hasStrongHit: boolean; injectedCount: number }> {
   params.signal?.throwIfAborted();
+  params.context.assertCurrent();
   const activeProjectKeys = params.activeProjectKeys ?? [];
   const candidates = await waitForTriggerLookup(
     resolveTriggerRecallCandidates(params),
     params.signal,
   );
+  params.context.assertCurrent();
   const matches = selectStrongTriggerMatches(params.message, candidates, activeProjectKeys);
   const context = buildTriggerRecallContext(matches);
   return {

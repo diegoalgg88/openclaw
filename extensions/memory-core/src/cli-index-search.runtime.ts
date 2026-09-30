@@ -15,8 +15,10 @@ import {
   resolveMemoryDreamingWorkspace,
   resolveMemoryDeepDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
+import { resolveForeignMemorySlotOwner } from "./cli-memory-slot.js";
 import {
   buildCliMemorySearchSessionKey,
+  emitMemoryCoreSidecarNotice,
   formatAuditCounts,
   formatExtraPaths,
   formatMemoryIndexOutcome,
@@ -206,6 +208,7 @@ export async function runMemorySearch(
     agent: opts.agent,
     diagnosticsToStderr: Boolean(opts.json),
     onUnavailable: opts.json ? defaultRuntime.writeJson : undefined,
+    requiresMemorySlot: true,
     purpose: "cli",
     inspectSources: true,
     ...hostOptions,
@@ -281,6 +284,10 @@ export async function runMemoryForget(opts: MemoryForgetCommandOptions) {
   try {
     const cfg = getRuntimeConfig({ skipPluginValidation: true });
     const agentId = resolveMemoryAgent(cfg, opts.agent);
+    const slotOwner = resolveForeignMemorySlotOwner(cfg);
+    if (slotOwner) {
+      emitMemoryCoreSidecarNotice(slotOwner, { json: Boolean(opts.json) });
+    }
     const report = await forgetMemoryEntries({
       cfg,
       agentId,

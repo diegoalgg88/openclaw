@@ -3,21 +3,20 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  authorizeActiveMemorySearchHits: vi.fn(),
-  getActiveMemorySearchManagerCore: vi.fn(),
+  getActiveMemoryProviderCore: vi.fn(),
 }));
 
 vi.mock("../plugins/memory-runtime.js", () => ({
-  authorizeActiveMemorySearchHits: mocks.authorizeActiveMemorySearchHits,
-  getActiveMemorySearchManagerCore: mocks.getActiveMemorySearchManagerCore,
+  getActiveMemoryProviderCore: mocks.getActiveMemoryProviderCore,
 }));
 
 import { resolveRealtimeVoiceFastContextConsult } from "./fast-context-runtime.js";
 
+const liveness = { assertCurrent() {} };
+
 describe("resolveRealtimeVoiceFastContextConsult", () => {
   beforeEach(() => {
-    mocks.authorizeActiveMemorySearchHits.mockReset().mockImplementation(async ({ hits }) => hits);
-    mocks.getActiveMemorySearchManagerCore.mockReset();
+    mocks.getActiveMemoryProviderCore.mockReset();
   });
 
   afterEach(() => {
@@ -27,9 +26,10 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
 
   it("caps oversized fast-context timeouts before scheduling Node timers", async () => {
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-    mocks.getActiveMemorySearchManagerCore.mockResolvedValue({
-      manager: {
-        search: vi.fn().mockResolvedValue([]),
+    mocks.getActiveMemoryProviderCore.mockResolvedValue({
+      provider: {
+        close: vi.fn(),
+        search: vi.fn().mockResolvedValue({ hits: [] }),
       },
     });
 
@@ -47,6 +47,7 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
         },
         args: { question: "What do you remember?" },
         logger: {},
+        liveness,
       }),
     ).resolves.toEqual({ handled: false });
 
@@ -56,8 +57,9 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
   it("preserves the fast-context timeout error and clears the timer", async () => {
     vi.useFakeTimers();
     const logger = { debug: vi.fn() };
-    mocks.getActiveMemorySearchManagerCore.mockResolvedValue({
-      manager: {
+    mocks.getActiveMemoryProviderCore.mockResolvedValue({
+      provider: {
+        close: vi.fn(),
         search: vi.fn(() => new Promise<never>(() => {})),
       },
     });
@@ -75,6 +77,7 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
       },
       args: { question: "What do you remember?" },
       logger,
+      liveness,
     });
 
     await vi.advanceTimersByTimeAsync(25);
@@ -88,18 +91,19 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
 
   it("does not split a surrogate pair at the fast-context snippet limit", async () => {
     const safePrefix = "x".repeat(698);
-    mocks.getActiveMemorySearchManagerCore.mockResolvedValue({
-      manager: {
-        search: vi.fn().mockResolvedValue([
-          {
-            path: "memory/test.md",
-            startLine: 1,
-            endLine: 1,
-            snippet: `${safePrefix}🚀tail`,
-            source: "memory",
-            score: 1,
-          },
-        ]),
+    mocks.getActiveMemoryProviderCore.mockResolvedValue({
+      provider: {
+        close: vi.fn(),
+        search: vi.fn().mockResolvedValue({
+          hits: [
+            {
+              reference: { providerId: "records", id: "test" },
+              excerpt: `${safePrefix}🚀tail`,
+              source: "memory",
+              score: 1,
+            },
+          ],
+        }),
       },
     });
 
@@ -116,67 +120,97 @@ describe("resolveRealtimeVoiceFastContextConsult", () => {
       },
       args: { question: "What do you remember?" },
       logger: {},
+      liveness,
     });
 
     expect(result).toEqual({
       handled: true,
       result: {
-        text: expect.stringContaining(`1. [memory] memory/test.md:1-1\n${safePrefix}...`),
+        text: expect.stringContaining(`1. [memory] records:test\n${safePrefix}...`),
       },
     });
   });
 
-  it("removes unauthorized session hits before building caller context", async () => {
-    const cfg = {};
-    const hits = [
-      {
-        path: "memory/allowed.md",
-        startLine: 1,
-        endLine: 1,
-        snippet: "Visible memory",
-        source: "memory" as const,
-        score: 1,
-      },
-      {
-        path: "sessions/private.jsonl",
-        startLine: 1,
-        endLine: 1,
-        snippet: "Private session secret",
-        source: "sessions" as const,
-        score: 1,
-      },
-    ];
-    mocks.getActiveMemorySearchManagerCore.mockResolvedValue({
-      manager: { search: vi.fn().mockResolvedValue(hits) },
+  it("passes genuine request identity without inventing owner privileges and revokes after return", async () => {
+    const search = vi.fn().mockResolvedValue({
+      hits: [{ reference: { providerId: "records", id: "visible" }, excerpt: "Visible memory" }],
     });
-    mocks.authorizeActiveMemorySearchHits.mockResolvedValue([hits[0]]);
-
+    const close = vi.fn();
+    mocks.getActiveMemoryProviderCore.mockResolvedValue({ provider: { search, close } });
     const result = await resolveRealtimeVoiceFastContextConsult({
-      cfg,
+      cfg: {},
       agentId: "main",
-      sessionKey: "agent:main:voice:15550001234",
+      sessionKey: "agent:main:voice:caller",
       config: {
         enabled: true,
-        timeoutMs: 1_000,
+        timeoutMs: 1000,
         maxResults: 2,
         sources: ["memory", "sessions"],
         fallbackToConsult: false,
       },
       args: { question: "What do you remember?" },
       logger: {},
+      liveness,
     });
-
-    expect(mocks.authorizeActiveMemorySearchHits).toHaveBeenCalledWith({
-      cfg,
-      agentId: "main",
-      requesterSessionKey: "agent:main:voice:15550001234",
+    const { context } = mocks.getActiveMemoryProviderCore.mock.calls[0]![0];
+    expect(context.authority).toEqual({
+      kind: "session",
+      sessionKey: "agent:main:voice:caller",
       sandboxed: false,
-      hits,
     });
-    expect(result).toEqual({
+    expect(() => context.assertCurrent()).toThrow("request has ended");
+    expect(close).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
       handled: true,
       result: { text: expect.stringContaining("Visible memory") },
     });
-    expect(result.handled && result.result.text).not.toContain("Private session secret");
   });
+
+  it.each(["search", "close"])(
+    "does not publish hits after caller authority expires during %s",
+    async (during) => {
+      let active = true;
+      const close = vi.fn(async () => {
+        if (during === "close") {
+          active = false;
+        }
+      });
+      mocks.getActiveMemoryProviderCore.mockResolvedValue({
+        provider: {
+          close,
+          search: vi.fn(async () => {
+            if (during === "search") {
+              active = false;
+            }
+            return {
+              hits: [{ reference: { providerId: "records", id: "secret" }, excerpt: "Secret" }],
+            };
+          }),
+        },
+      });
+      const result = await resolveRealtimeVoiceFastContextConsult({
+        cfg: {},
+        agentId: "main",
+        sessionKey: "voice:caller",
+        config: {
+          enabled: true,
+          timeoutMs: 1000,
+          maxResults: 2,
+          sources: ["memory"],
+          fallbackToConsult: true,
+        },
+        args: { question: "What do you remember?" },
+        logger: {},
+        liveness: {
+          assertCurrent() {
+            if (!active) {
+              throw new Error("revoked");
+            }
+          },
+        },
+      });
+      expect(result).toEqual({ handled: false });
+      expect(close).toHaveBeenCalledOnce();
+    },
+  );
 });

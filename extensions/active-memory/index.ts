@@ -363,6 +363,15 @@ export default definePluginEntry({
                 laneOne = await resolveTriggerRecall({
                   cfg: liveConfig,
                   agentId: effectiveAgentId,
+                  context: {
+                    authority: { kind: "host", operation: "active-memory-trigger-recall" },
+                    signal: deadlineController.signal,
+                    assertCurrent() {
+                      deadlineController.signal.throwIfAborted();
+                      toolAuthority.assertActive();
+                      ctx.hookInvocation?.assertActive();
+                    },
+                  },
                   query: searchQuery,
                   message: currentUserMessage,
                   activeProjectKeys: ctx.activeProjectKeys,

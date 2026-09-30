@@ -2,18 +2,19 @@ import {
   extractProjectKeysFromCuratedEntry,
   normalizeProjectAnnotationKey,
   splitCuratedMarkdownEntries,
-  stripMemoryAnnotationCarriers,
 } from "../../packages/memory-host-sdk/src/engine-storage.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import {
-  isAutomaticMemoryEntryEligible,
-  type MemorySearchResult,
-} from "../memory-host-sdk/host/types.js";
-import { getMemoryRuntime } from "../plugins/memory-state.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
+import type {
+  MemoryCallerContext,
+  MemorySearchHit,
+  MemoryProviderHandle,
+} from "../plugins/memory-provider-types.js";
 import type { EmbeddedContextFile } from "./embedded-agent-helpers/context-file.js";
 
 const PROJECT_MEMORY_BOOTSTRAP_MAX_CHARS = 2_000;
 const PROJECT_MEMORY_ENTRY_MAX_CHARS = 600;
+const log = createSubsystemLogger("agents/project-memory-bootstrap");
 
 function isCuratedProjectContextPath(value: unknown): boolean {
   if (typeof value !== "string" || !value.trim()) {
@@ -63,7 +64,7 @@ function truncateEntry(value: string, maxChars: number): string {
 }
 
 function buildProjectMemoryBootstrap(params: {
-  entries: MemorySearchResult[];
+  entries: MemorySearchHit[];
   activeProjectKeys: readonly string[];
   maxChars?: number;
 }): string[] {
@@ -74,23 +75,22 @@ function buildProjectMemoryBootstrap(params: {
   const active = new Set(params.activeProjectKeys);
   const candidates = params.entries
     .filter((entry) => {
-      const storedProjectKeys = entry.projectKey
-        ?.split(";")
-        .map((key) => key.trim())
-        .filter(Boolean);
+      const storedProjectKeys = entry.automaticRecall?.projectKeys;
       return (
-        isAutomaticMemoryEntryEligible(entry) &&
+        entry.automaticRecall?.eligible === true &&
         storedProjectKeys !== undefined &&
         storedProjectKeys.length > 0 &&
-        storedProjectKeys.every((key) => active.has(key)) &&
-        entry.path.replaceAll("\\", "/").replace(/^\.\//u, "").toUpperCase() === "MEMORY.MD"
+        storedProjectKeys.every((key) => active.has(key))
       );
     })
     .toSorted(
       (left, right) =>
-        (right.importance ?? 0) - (left.importance ?? 0) ||
-        left.path.localeCompare(right.path) ||
-        left.startLine - right.startLine,
+        (right.automaticRecall?.importance ?? 0) - (left.automaticRecall?.importance ?? 0) ||
+        left.reference.providerId.localeCompare(right.reference.providerId) ||
+        left.reference.id.localeCompare(right.reference.id) ||
+        (left.reference.fragment ?? "").localeCompare(right.reference.fragment ?? "", undefined, {
+          numeric: true,
+        }),
     );
   if (candidates.length === 0 || maxChars === 0) {
     return [];
@@ -106,13 +106,16 @@ function buildProjectMemoryBootstrap(params: {
   }
   for (const entry of candidates) {
     const snippet = truncateEntry(
-      stripMemoryAnnotationCarriers(entry.snippet).replace(/\s+/gu, " ").trim(),
+      entry.excerpt.replace(/\s+/gu, " ").trim(),
       PROJECT_MEMORY_ENTRY_MAX_CHARS,
     );
     if (!snippet) {
       continue;
     }
-    const line = `- ${snippet} (Source: ${entry.path}#L${String(entry.startLine)})`;
+    const citation =
+      entry.citations?.map((source) => source.label).join(", ") ||
+      `${entry.reference.providerId}:${entry.reference.id}`;
+    const line = `- ${snippet} (Source: ${citation})`;
     const candidateChars = renderedChars + line.length + 1;
     if (candidateChars <= maxChars) {
       lines.push(line);
@@ -126,31 +129,65 @@ export async function prepareProjectMemoryBootstrap(params: {
   cfg: OpenClawConfig;
   agentId: string;
   activeProjectKeys: readonly string[];
+  context?: MemoryCallerContext;
 }): Promise<string[]> {
   if (params.activeProjectKeys.length === 0) {
     return [];
   }
-  const runtime = getMemoryRuntime();
-  if (!runtime) {
-    return [];
-  }
+  let active = true;
+  const context: MemoryCallerContext = {
+    authority: params.context?.authority ?? { kind: "host", operation: "project-memory-bootstrap" },
+    signal: params.context?.signal,
+    assertCurrent() {
+      if (!active) {
+        throw new Error("project memory request has ended");
+      }
+      params.context?.signal?.throwIfAborted();
+      params.context?.assertCurrent();
+    },
+  };
+  let provider: MemoryProviderHandle | null = null;
+  let lines: string[] = [];
   try {
-    const lookup = await runtime.getMemorySearchManager({
+    const { getActiveMemoryProviderCore } = await import("../plugins/memory-runtime.js");
+    const lookup = await getActiveMemoryProviderCore({
       cfg: params.cfg,
       agentId: params.agentId,
-      purpose: "default",
+      context,
     });
-    if (!lookup.manager?.listCuratedProjectCandidates) {
-      return [];
+    provider = lookup.provider;
+    if (
+      lookup.provider?.candidates &&
+      lookup.provider.capabilities.candidates.includes("project")
+    ) {
+      const results = await lookup.provider.candidates({
+        kind: "project",
+        activeProjectKeys: [...params.activeProjectKeys],
+        limit: 48,
+      });
+      context.assertCurrent();
+      lines = buildProjectMemoryBootstrap({
+        entries: results.hits,
+        activeProjectKeys: params.activeProjectKeys,
+      });
     }
-    const results = await lookup.manager.listCuratedProjectCandidates({
-      activeProjectKeys: [...params.activeProjectKeys],
-      limit: 48,
-    });
-    return buildProjectMemoryBootstrap({
-      entries: results,
-      activeProjectKeys: params.activeProjectKeys,
-    });
+  } catch {
+    lines = [];
+  } finally {
+    active = false;
+    try {
+      await provider?.close();
+    } catch (error) {
+      // Project recall is optional: a failed lease release omits recall, never the attempt.
+      log.debug(`project memory cleanup failed: ${String(error)}`);
+      lines = [];
+    }
+  }
+  try {
+    // Cleanup may yield after selection; the owning run still controls release.
+    params.context?.signal?.throwIfAborted();
+    params.context?.assertCurrent();
+    return lines;
   } catch {
     return [];
   }

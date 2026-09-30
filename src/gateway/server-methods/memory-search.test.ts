@@ -24,9 +24,13 @@ import {
 import type { GatewayRequestContext, RespondFn } from "./types.js";
 
 const getActiveMemorySearchManagerCore = vi.hoisted(() => vi.fn());
+const resolveActiveMemoryBackendConfig = vi.hoisted(() => vi.fn());
 const resolveDefaultAgentId = vi.hoisted(() => vi.fn(() => "main"));
 
-vi.mock("../../plugins/memory-runtime.js", () => ({ getActiveMemorySearchManagerCore }));
+vi.mock("../../plugins/memory-runtime.js", () => ({
+  getActiveMemorySearchManagerCore,
+  resolveActiveMemoryBackendConfig,
+}));
 vi.mock("../../agents/agent-scope.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../agents/agent-scope.js")>()),
   resolveDefaultAgentId,
@@ -87,6 +91,7 @@ describe("memory.search gateway method", () => {
       layout: "state-only",
     });
     getActiveMemorySearchManagerCore.mockReset();
+    resolveActiveMemoryBackendConfig.mockReset().mockReturnValue({ backend: "builtin" });
     resolveDefaultAgentId.mockClear();
   });
 

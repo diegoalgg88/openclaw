@@ -39,6 +39,7 @@ import {
   setSetupGraceTimeoutMsForTests,
 } from "./config.js";
 import plugin from "./index.js";
+import { registerActiveMemoryProviderTests } from "./index.memory-provider.test-support.js";
 import * as recallRun from "./recall-run.js";
 import {
   buildCacheKey,
@@ -77,7 +78,7 @@ const hoisted = vi.hoisted(() => {
   };
   return {
     closeActiveMemorySearchManager: vi.fn(async () => {}),
-    getActiveMemorySearchManager: vi.fn(async () => ({ manager: null })),
+    getActiveMemoryProvider: vi.fn(async () => ({ provider: null })),
     cleanupSessionLifecycleArtifacts: vi.fn(),
     patchSessionEntry: vi.fn(),
     rawDeltaReads: [] as Array<{ maxBytes?: number; maxEvents?: number; sessionId: string }>,
@@ -96,7 +97,7 @@ const hoisted = vi.hoisted(() => {
 
 vi.mock("openclaw/plugin-sdk/memory-host-search", () => ({
   closeActiveMemorySearchManager: hoisted.closeActiveMemorySearchManager,
-  getActiveMemorySearchManager: hoisted.getActiveMemorySearchManager,
+  getActiveMemoryProvider: hoisted.getActiveMemoryProvider,
 }));
 
 vi.mock("openclaw/plugin-sdk/memory-host-core", async () => {
@@ -619,6 +620,13 @@ describe("active-memory plugin", () => {
     registerPluginConfig({ timeoutMs, logging: true, ...overrides });
   };
 
+  registerActiveMemoryProviderTests({
+    getActiveMemoryProvider: hoisted.getActiveMemoryProvider,
+    runEmbeddedAgent,
+    registerPluginConfig,
+    runPromptBuild,
+  });
+
   let stateIndex = 0;
   beforeAll(async () => {
     // openclaw-temp-dir: allow suite-owned session stores drain once before removal
@@ -781,7 +789,7 @@ describe("active-memory plugin", () => {
 
     expect(result).toBeUndefined();
     expect(assertActive).toHaveBeenCalled();
-    expect(hoisted.getActiveMemorySearchManager).not.toHaveBeenCalled();
+    expect(hoisted.getActiveMemoryProvider).not.toHaveBeenCalled();
     expect(runEmbeddedAgent).not.toHaveBeenCalled();
     expect(hasInfoLine("active-memory: recall skipped reason=policy-disabled")).toBe(true);
   });
@@ -814,7 +822,7 @@ describe("active-memory plugin", () => {
 
       expect(result).toBeUndefined();
       expect(runEmbeddedAgent).not.toHaveBeenCalled();
-      expect(hoisted.getActiveMemorySearchManager).not.toHaveBeenCalled();
+      expect(hoisted.getActiveMemoryProvider).not.toHaveBeenCalled();
       expect(hasInfoLine("active-memory: recall skipped reason=session-ineligible")).toBe(true);
     },
   );
@@ -1061,54 +1069,6 @@ describe("active-memory plugin", () => {
     }
   });
 
-  it.each([" \n "])(
-    "does not recall historical text for an explicit empty request %j",
-    async (currentUserMessage) => {
-      registerPluginConfig({ mode: "always" });
-      const search = vi.fn(async () => []);
-      hoisted.getActiveMemorySearchManager.mockResolvedValue({
-        manager: { search, listTriggerCandidates: vi.fn(async () => []) },
-      } as never);
-      await runPromptBuild({
-        prompt: "What do you remember about my preferences?",
-        currentUserMessage,
-        currentUserMessageId: "empty-admission",
-        messages: [{ role: "user", content: "What do you remember about my preferences?" }],
-      });
-      expect(search).not.toHaveBeenCalled();
-      expect(runEmbeddedAgent).not.toHaveBeenCalled();
-    },
-  );
-
-  it("reuses one trigger admission across history changes and keeps authority separate", async () => {
-    registerPluginConfig({ mode: "escalate" });
-    const search = vi.fn(async () => []);
-    hoisted.getActiveMemorySearchManager.mockResolvedValue({
-      manager: { search, listTriggerCandidates: vi.fn(async () => []) },
-    } as never);
-    for (const [history, fingerprint, admission] of [
-      ["old history", "authority-a", "same-admission"],
-      ["rebuilt history", "authority-a", "same-admission"],
-      ["rebuilt history", "authority-b", "same-admission"],
-      ["rebuilt history", "authority-b", "new-admission"],
-    ] as const) {
-      await runPromptBuild(
-        {
-          prompt: history,
-          currentUserMessage: "ok",
-          currentUserMessageId: admission,
-          messages: [{ role: "user", content: history }],
-        },
-        {
-          runId: "trigger-rebuild",
-          toolAuthority: { fingerprint, allows: () => true, assertActive: () => undefined },
-        },
-      );
-    }
-    expect(search).toHaveBeenCalledTimes(3);
-    expect(runEmbeddedAgent).not.toHaveBeenCalled();
-  });
-
   it("does not invent model-recall identity when the producer has no admission ID", async () => {
     runEmbeddedAgent.mockImplementation(async () => ({ payloads: [] }));
     for (let invocation = 0; invocation < 2; invocation += 1) {
@@ -1121,7 +1081,7 @@ describe("active-memory plugin", () => {
       );
     }
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(2);
-    expect(hoisted.getActiveMemorySearchManager).toHaveBeenCalledTimes(2);
+    expect(hoisted.getActiveMemoryProvider).toHaveBeenCalledTimes(2);
   });
 
   it("joins concurrent identical recall attempts in one run", async () => {
@@ -1452,7 +1412,7 @@ describe("active-memory plugin", () => {
       },
     );
     expect(lastEmbeddedRunParams().conversationRecall).toBeUndefined();
-    expect(hoisted.getActiveMemorySearchManager).toHaveBeenCalledTimes(1);
+    expect(hoisted.getActiveMemoryProvider).toHaveBeenCalledTimes(1);
   });
 
   it("registers a session-scoped active-memory toggle command", async () => {
@@ -1716,7 +1676,7 @@ describe("active-memory plugin", () => {
     );
 
     expect(result).toBeUndefined();
-    expect(hoisted.getActiveMemorySearchManager).not.toHaveBeenCalled();
+    expect(hoisted.getActiveMemoryProvider).not.toHaveBeenCalled();
     expect(runEmbeddedAgent).not.toHaveBeenCalled();
     expect(hoisted.updateSessionStore).not.toHaveBeenCalled();
   });
@@ -1859,25 +1819,21 @@ describe("active-memory plugin", () => {
   );
 
   it("logs deterministic trigger injections when invocation logging is enabled", async () => {
-    hoisted.getActiveMemorySearchManager.mockResolvedValueOnce({
-      manager: {
-        search: vi.fn(async () => []),
-        listTriggerCandidates: vi.fn(async () => [
-          {
-            path: "MEMORY.md",
-            startLine: 1,
-            endLine: 1,
-            score: 1,
-            snippet: "Prefer aisle seats.",
-            source: "memory" as const,
-            provenance: {
-              originClass: "agent" as const,
-              sessionKind: "interactive" as const,
-              observedAt: 1,
+    hoisted.getActiveMemoryProvider.mockResolvedValueOnce({
+      provider: {
+        search: vi.fn(async () => ({ hits: [] })),
+        capabilities: { candidates: ["trigger"] },
+        candidates: vi.fn(async () => ({
+          hits: [
+            {
+              reference: { providerId: "records", id: "travel" },
+              score: 1,
+              excerpt: "Prefer aisle seats.",
+              automaticRecall: { eligible: true, triggers: "booking a flight" },
             },
-            triggers: "booking a flight",
-          },
-        ]),
+          ],
+        })),
+        close: vi.fn(),
       },
     } as never);
 
@@ -1930,9 +1886,7 @@ describe("active-memory plugin", () => {
             }, 1_000);
           }),
       });
-      hoisted.getActiveMemorySearchManager.mockImplementationOnce(
-        () => new Promise<never>(() => {}),
-      );
+      hoisted.getActiveMemoryProvider.mockImplementationOnce(() => new Promise<never>(() => {}));
 
       let settled = false;
       const isSettled = () => settled;
@@ -1975,7 +1929,7 @@ describe("active-memory plugin", () => {
           setTimeout(() => resolve(undefined), 1_490);
         }),
     });
-    hoisted.getActiveMemorySearchManager.mockImplementationOnce(() => new Promise<never>(() => {}));
+    hoisted.getActiveMemoryProvider.mockImplementationOnce(() => new Promise<never>(() => {}));
 
     let settled = false;
     const isSettled = () => settled;
@@ -1995,7 +1949,7 @@ describe("active-memory plugin", () => {
     }
 
     const result = await resultPromise;
-    expect(hoisted.getActiveMemorySearchManager).not.toHaveBeenCalled();
+    expect(hoisted.getActiveMemoryProvider).not.toHaveBeenCalled();
     expect(
       hasDebugLine("active-memory: lane-1 trigger recall skipped: preflight budget exhausted"),
     ).toBe(true);
