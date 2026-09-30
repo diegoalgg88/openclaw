@@ -14,6 +14,7 @@ import { isLoopbackGatewayUrl } from "../gateway/net.js";
 import { resolveGatewayProbeTarget } from "../gateway/probe-target.js";
 import type { GatewayProbeResult, probeGateway as probeGatewayFn } from "../gateway/probe.js";
 import type { MemoryProviderStatus } from "../memory-host-sdk/engine-storage.js";
+import type { ActiveMemoryProviderResult, MemoryHealth } from "../plugins/memory-provider-types.js";
 import { defaultSlotIdForKey } from "../plugins/slots.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -49,9 +50,9 @@ async function hasBuiltInMemoryState(databasePath: string): Promise<boolean> {
   return await inspectMemoryIndexPresence(databasePath);
 }
 
-export type MemoryStatusSnapshot = MemoryProviderStatus & {
-  agentId: string;
-};
+export type MemoryStatusSnapshot =
+  | (MemoryProviderStatus & { agentId: string })
+  | { agentId: string; provider: string; health: MemoryHealth };
 
 export type GatewayProbeSnapshot = {
   gatewayConnection: ReturnType<typeof buildGatewayConnectionDetailsWithResolvers>;
@@ -359,6 +360,19 @@ export async function resolveSharedMemoryStatusSnapshot(params: {
     agentId: string,
   ) => { store: { databasePath: string } } | null;
   getMemorySearchManager: StatusMemorySearchManagerResolver;
+  resolveMemoryBackendConfig?: (params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+  }) => { backend: "builtin" } | { backend: "provider-runtime"; providerId: string } | null;
+  getMemoryProvider?: (params: {
+    cfg: OpenClawConfig;
+    agentId: string;
+    purpose: "status";
+    context: {
+      authority: { kind: "host"; operation: "status" };
+      assertCurrent(): void;
+    };
+  }) => Promise<ActiveMemoryProviderResult>;
   requireDefaultDatabasePath?: (agentId: string) => string | null;
 }): Promise<MemoryStatusSnapshot | null> {
   const { cfg, agentStatus, memoryPlugin } = params;
@@ -370,6 +384,36 @@ export async function resolveSharedMemoryStatusSnapshot(params: {
     // Memory is agent-scoped. An explicit fleet has no default owner, so status must not
     // inspect an arbitrary first agent's database merely to populate a read-only summary.
     return null;
+  }
+
+  const backend = params.resolveMemoryBackendConfig?.({ cfg, agentId });
+  if (backend?.backend === "provider-runtime") {
+    let provider: ActiveMemoryProviderResult["provider"] = null;
+    try {
+      const acquired = await params.getMemoryProvider?.({
+        cfg,
+        agentId,
+        purpose: "status",
+        context: {
+          authority: { kind: "host", operation: "status" },
+          assertCurrent() {},
+        },
+      });
+      provider = acquired?.provider ?? null;
+      const providerId = acquired?.providerId ?? backend.providerId;
+      const health = provider
+        ? await provider.health()
+        : { status: "unavailable" as const, message: acquired?.error ?? "provider unavailable" };
+      return { agentId, provider: providerId, health };
+    } catch (error) {
+      return {
+        agentId,
+        provider: backend.providerId,
+        health: { status: "unavailable", message: String(error) },
+      };
+    } finally {
+      await provider?.close().catch(() => {});
+    }
   }
 
   if (memoryPlugin.slot !== defaultSlotIdForKey("memory")) {

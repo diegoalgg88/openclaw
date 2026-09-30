@@ -28,7 +28,6 @@ import {
   withPluginRuntimeRegistryScope,
 } from "./runtime/gateway-request-scope.js";
 
-type AuthorizeSearchHits = NonNullable<MemoryPluginRuntime["authorizeSearchHits"]>;
 type ClassifyWorkspaceMemoryPaths = NonNullable<
   MemoryPluginRuntime["classifyWorkspaceMemoryPaths"]
 >;
@@ -53,7 +52,6 @@ vi.mock("./memory-state.js", async (importOriginal) => {
 });
 
 import {
-  authorizeActiveMemorySearchHits,
   classifyActiveMemoryWorkspacePaths,
   closeActiveMemorySearchManagerCore,
   closeActiveMemorySearchManagersCore,
@@ -65,7 +63,6 @@ import { hasMemoryRuntime } from "./memory-state.js";
 
 function createRuntime() {
   return {
-    authorizeSearchHits: vi.fn<AuthorizeSearchHits>(async ({ hits }) => hits),
     classifyWorkspaceMemoryPaths: vi.fn<ClassifyWorkspaceMemoryPaths>(async ({ relativePaths }) =>
       relativePaths.map((relativePath) => ({ relativePath, originClass: "agent" as const })),
     ),
@@ -74,27 +71,6 @@ function createRuntime() {
     closeMemorySearchManager: vi.fn(async () => {}),
     closeAllMemorySearchManagers: vi.fn(async () => {}),
   } satisfies MemoryPluginRuntime;
-}
-
-function createSearchHits(): MemorySearchResult[] {
-  return [
-    {
-      source: "memory",
-      path: "memory.md",
-      startLine: 1,
-      endLine: 1,
-      score: 1,
-      snippet: "memory",
-    },
-    {
-      source: "sessions",
-      path: "sessions/private.jsonl",
-      startLine: 1,
-      endLine: 1,
-      score: 1,
-      snippet: "private",
-    },
-  ];
 }
 
 type TestRegistry<T extends MemoryPluginRuntime> = {
@@ -667,26 +643,6 @@ describe("memory runtime handles", () => {
     expect(closed).toBe(true);
   });
 
-  it("authorizes raw hits inside the selected plugin runtime scope", async () => {
-    const { registry, runtime } = createRegistry();
-    runtime.authorizeSearchHits.mockImplementationOnce(async ({ hits }) => {
-      expect(getPluginRuntimeGatewayRequestScope()?.pluginRegistry).toBe(registry);
-      return hits.filter((hit) => hit.source === "memory");
-    });
-    mocks.loadPluginRegistryHandle.mockReturnValue(registry);
-    const hits = createSearchHits();
-
-    await expect(
-      authorizeActiveMemorySearchHits({
-        cfg: memoryConfig,
-        agentId: "main",
-        requesterSessionKey: "agent:main:voice:15550001234",
-        sandboxed: false,
-        hits,
-      }),
-    ).resolves.toEqual([hits[0]]);
-  });
-
   it("classifies workspace paths inside the selected plugin runtime scope", async () => {
     const { registry, runtime } = createRegistry();
     runtime.classifyWorkspaceMemoryPaths.mockImplementationOnce(async ({ relativePaths }) => {
@@ -762,29 +718,6 @@ describe("memory runtime handles", () => {
       status: "classified",
     });
     expect(runtime.classifyWorkspaceMemoryPaths).toHaveBeenCalledExactlyOnceWith(params);
-  });
-
-  it("fails closed on session hits when a memory runtime has no authorizer", async () => {
-    const runtimeWithoutAuthorizer = {
-      getMemorySearchManager: vi.fn(async () => ({ manager: null, error: "no index" })),
-      resolveMemoryBackendConfig: vi.fn(() => ({ backend: "builtin" as const })),
-      closeMemorySearchManager: vi.fn(async () => {}),
-      closeAllMemorySearchManagers: vi.fn(async () => {}),
-    } satisfies MemoryPluginRuntime;
-    mocks.loadPluginRegistryHandle.mockReturnValue(
-      createRegistry(runtimeWithoutAuthorizer).registry,
-    );
-    const hits = createSearchHits();
-
-    await expect(
-      authorizeActiveMemorySearchHits({
-        cfg: memoryConfig,
-        agentId: "main",
-        requesterSessionKey: "agent:main:voice:15550001234",
-        sandboxed: false,
-        hits,
-      }),
-    ).resolves.toEqual([hits[0]]);
   });
 
   it("closes managers through current and retired workspace handles without reloading", async () => {

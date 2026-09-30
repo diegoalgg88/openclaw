@@ -505,6 +505,44 @@ function memoryManager<
 }
 
 describe("resolveSharedMemoryStatusSnapshot", () => {
+  it("reports native provider health instead of returning a silent null", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const health = vi.fn().mockResolvedValue({ status: "ready", message: "connected" });
+    const getMemoryProvider = vi.fn().mockResolvedValue({
+      providerId: "records",
+      provider: { health, close },
+    });
+    const getMemorySearchManager = vi.fn();
+
+    const result = await resolveSharedMemoryStatusSnapshot({
+      cfg: { plugins: { slots: { memory: "records" } } },
+      agentStatus: { defaultId: "main" },
+      memoryPlugin: { enabled: true, slot: "records" },
+      resolveMemoryConfig: vi.fn(() => null),
+      getMemorySearchManager,
+      resolveMemoryBackendConfig: () => ({
+        backend: "provider-runtime",
+        providerId: "records",
+      }),
+      getMemoryProvider,
+    });
+
+    expect(getMemoryProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: "main",
+        purpose: "status",
+        context: expect.objectContaining({ authority: { kind: "host", operation: "status" } }),
+      }),
+    );
+    expect(result).toEqual({
+      agentId: "main",
+      provider: "records",
+      health: { status: "ready", message: "connected" },
+    });
+    expect(getMemorySearchManager).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("skips agent-scoped memory when an explicit fleet has no selected owner", async () => {
     const resolveMemoryConfig = vi.fn();
     const getMemorySearchManager = vi.fn();
@@ -558,8 +596,7 @@ describe("resolveSharedMemoryStatusSnapshot", () => {
     expect(getMemorySearchManager).toHaveBeenCalledWith(
       expect.objectContaining({ purpose: "status", inspectSources: true }),
     );
-    expect(result?.provider).toBe("local");
-    expect(result?.dirty).toBe(true);
+    expect(result).toMatchObject({ provider: "local", dirty: true });
   });
 
   it("asks custom memory-slot runtimes for status without requiring built-in memorySearch", async () => {
@@ -681,7 +718,7 @@ describe("resolveSharedMemoryStatusSnapshot", () => {
     });
 
     expect(getMemorySearchManager).toHaveBeenCalledOnce();
-    expect(result?.files).toBe(1);
+    expect(result).toMatchObject({ files: 1 });
   });
 
   it("does not initialize memory status for an agent database owned by another feature", async () => {

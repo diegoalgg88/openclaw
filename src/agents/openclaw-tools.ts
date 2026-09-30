@@ -486,6 +486,7 @@ export function createOpenClawTools(options?: OpenClawToolsOptions): AnyAgentToo
     !embedded || options?.allowGatewaySubagentBinding === true
       ? createSessionsSpawnTool({
           ...options,
+          expectedParentSessionId: options?.sessionId,
           agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
           requesterTurnRunId: options?.runId,
           completionOwnerKey: options?.runSessionKey,

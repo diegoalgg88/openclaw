@@ -3,6 +3,7 @@ import {
   isAutomaticMemoryEntryEligible,
   type MemorySearchResult,
 } from "../memory-host-sdk/host/types.js";
+import { assertMemoryCallerCurrent } from "./memory-audience.js";
 import type {
   MemoryCallerContext,
   MemoryProviderHandle,
@@ -31,8 +32,7 @@ export function bindMemoryProvider(
     if (closed) {
       throw new Error("memory provider handle is closed");
     }
-    context.assertCurrent();
-    context.signal?.throwIfAborted();
+    assertMemoryCallerCurrent(context);
     if (
       instance &&
       (!instance.acceptingCalls || instance.owner?.revoked || instance.lifecycle.signal.aborted)

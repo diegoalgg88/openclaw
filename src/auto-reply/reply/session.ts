@@ -24,7 +24,6 @@ import {
 import { canonicalizeMainSessionAlias } from "../../config/sessions/main-session.js";
 import { deriveSessionMetaPatch } from "../../config/sessions/metadata.js";
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
-import { resolveResetPreservedSelection } from "../../config/sessions/reset-preserved-selection.js";
 import {
   evaluateSessionFreshness,
   resolveChannelResetConfig,
@@ -51,7 +50,6 @@ import {
 import {
   DEFAULT_RESET_TRIGGERS,
   SESSION_TOTAL_TOKENS_VERSION,
-  type InternalSessionEntry,
   type SessionEntry,
 } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -78,7 +76,6 @@ import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gat
 import {
   buildAgentMainSessionKey,
   isAcpSessionKey,
-  isSubagentSessionKey,
   normalizeMainKey,
 } from "../../routing/session-key.js";
 import { resolveAgentHarnessSessionContextError } from "../../sessions/agent-harness-session-key.js";
@@ -153,6 +150,7 @@ import {
   stopSessionResetSubagents,
 } from "./session-reset-cleanup.js";
 import { resolveAuthorizedSessionResetCommand } from "./session-reset-command.js";
+import { resolveReplySessionRolloverState } from "./session-rollover-state.js";
 import { stripThreadFromSessionRoute, stripThreadId } from "./session-route-reset.js";
 
 const log = createSubsystemLogger("session-init");
@@ -276,56 +274,6 @@ export async function resolveReplySessionPreprocessingState(
     sessionEntry,
     sessionKey,
     storePath: attemptContext.storePath,
-  };
-}
-
-function resolveReplySessionRolloverState(
-  entry: SessionEntry,
-  sessionKey: string,
-): Partial<InternalSessionEntry> {
-  const preservedSelection = resolveResetPreservedSelection({ entry });
-  // Stable ACP rows predate durable creation stamps. Preserve their restrictions
-  // fail-closed so rollover cannot turn an existing child into a root session.
-  const preserveSpawnLineage = isSubagentSessionKey(sessionKey) || isAcpSessionKey(sessionKey);
-  return {
-    thinkingLevel: entry.thinkingLevel,
-    verboseLevel: entry.verboseLevel,
-    traceLevel: entry.traceLevel,
-    reasoningLevel: entry.reasoningLevel,
-    ttsAuto: entry.ttsAuto,
-    responseUsage: entry.responseUsage,
-    ...selectSessionModelOverride(preservedSelection),
-    authProfileOverride: preservedSelection.authProfileOverride,
-    authProfileOverrideSource: preservedSelection.authProfileOverrideSource,
-    authProfileOverrideCompactionCount: preservedSelection.authProfileOverrideCompactionCount,
-    label: entry.label,
-    autoLabel: entry.autoLabel,
-    displayName: entry.displayName,
-    category: entry.category,
-    // Notice debt survives rollover: erasing it here would recreate the
-    // silent ambiguous-loss outcome the debt exists to prevent.
-    pendingDeliveryNotice: entry.pendingDeliveryNotice,
-    ...(preserveSpawnLineage
-      ? {
-          spawnedBy: entry.spawnedBy,
-          spawnedWorkspaceDir: entry.spawnedWorkspaceDir,
-          spawnedCwd: entry.spawnedCwd,
-          spawnDepth: entry.spawnDepth,
-          subagentRole: entry.subagentRole,
-          subagentControlScope: entry.subagentControlScope,
-        }
-      : {}),
-    parentSessionKey: entry.parentSessionKey,
-    parentSessionId: entry.parentSessionId,
-    forkedFromParent: entry.forkedFromParent,
-    forkSource: entry.forkSource,
-    createdVia: entry.createdVia,
-    createdActor: entry.createdActor,
-    createdAt: entry.createdAt,
-    // Chat preferences survive rollover; native-runtime consent belongs to the old incarnation.
-    permissionMode: entry.permissionMode,
-    sandboxMode: entry.sandboxMode,
-    ...(entry.sandbox === "required" ? { sandbox: "required" } : {}),
   };
 }
 

@@ -1,3 +1,4 @@
+import { assertMemoryAudienceSession } from "./memory-audience.js";
 import { capturePluginLifecycleAuthority } from "./registry-lifecycle.js";
 import type { PluginRegistry, PluginToolRegistration } from "./registry-types.js";
 import type { OpenClawPluginToolContext } from "./tool-types.js";
@@ -20,6 +21,9 @@ export function createPluginToolFactoryContext(params: {
   ownerContinuation?: PluginToolOwnerContinuation;
 }): OpenClawPluginToolContext<2> {
   const { entry, registry, context } = params;
+  if (context.memoryAudience) {
+    assertMemoryAudienceSession(context.memoryAudience, context.sessionKey);
+  }
   const record = registry.plugins.find((candidate) => candidate.id === entry.pluginId);
   const authority = capturePluginLifecycleAuthority(registry, record, { scopedRuntime: true });
   const continuation = entry.contextVersion === 2 ? params.ownerContinuation : undefined;
@@ -34,6 +38,7 @@ export function createPluginToolFactoryContext(params: {
     }
     params.assertInvocationCurrent?.();
     continuation?.assertCurrent();
+    context.assertMemoryAudienceCurrent?.();
   };
   return {
     ...context,
