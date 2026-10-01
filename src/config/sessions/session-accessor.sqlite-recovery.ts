@@ -1,216 +1,178 @@
+import { isMainThread } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { SqliteWorkerError } from "../../infra/sqlite-worker-contract.js";
+import type { SqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
+import type { RetainedWorkerTransactionAdmission } from "../../infra/sqlite-worker-operation-settlement.js";
 import { runOpenClawAgentWriteTransaction } from "../../state/openclaw-agent-db.js";
+import { supportsOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import {
-  normalizeLifecycleTarget,
-  readSessionIdentitySnapshot,
-  resolveLifecyclePrimaryEntry,
-  writeSessionEntry,
-} from "./session-accessor.sqlite-entry-store.js";
-import { prepareSessionIdentityPublication } from "./session-accessor.sqlite-identity.js";
-import { loadTranscriptEventsFromDatabase } from "./session-accessor.sqlite-read.js";
+  retainSessionEntryWorkerPublication,
+  type SessionEntryReplacementPublication,
+} from "./session-accessor.sqlite-entry-cache.js";
 import {
-  formatLegacySqliteSessionMarkerForScope,
+  prepareSessionIdentityPublication,
+  publishCommittedSessionIdentity,
+} from "./session-accessor.sqlite-identity.js";
+import {
+  recoverRestartTombstoneInDatabase,
+  type RestartTombstoneRecoveryInput,
+  type RestartTombstoneRecoveryResult,
+} from "./session-accessor.sqlite-recovery-kernel.js";
+import { withSessionEntryWorker } from "./session-accessor.sqlite-replacement-worker.js";
+import {
+  captureLifecycleDatabaseScope,
+  prepareSqliteScope,
   resolveSqliteStoreScope,
+  resolveSqliteWriteAdmissionScope,
   runExclusiveSqliteSessionWrite,
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
-import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
-import { findSessionTranscriptHeader } from "./session-entry-codec.js";
-import type { SessionActor } from "./session-entry-provenance.js";
-import { normalizeStoreSessionKey } from "./store-entry.js";
-import { createSessionTranscriptHeader } from "./transcript-header.js";
-import type { InternalSessionEntry, SessionEntry } from "./types.js";
-import { MIN_READABLE_SESSION_VERSION } from "./version.js";
 
-export type RestartTombstoneRecoveryResult =
-  | {
-      status: "created" | "existing";
-      sourceEntry: SessionEntry;
-      successorEntry: SessionEntry;
-      successorKey: string;
-    }
-  | {
-      status: "conflict";
-      reason:
-        | "not-tombstoned"
-        | "source-changed"
-        | "successor-missing"
-        | "target-exists"
-        | "transcript-missing";
-    };
+export type { RestartTombstoneRecoveryResult } from "./session-accessor.sqlite-recovery-kernel.js";
 
-/**
- * Atomically clones a tombstoned transcript, creates its successor, and records
- * the revisioned source archive/link transition in the same agent database.
- */
-export async function recoverSessionEntryFromRestartTombstone(params: {
-  agentId: string;
-  archivedBy?: SessionActor;
-  expected: {
-    cycleId: string;
-    lifecycleRevision?: string;
-    pluginOwnerId?: string;
-    revision: number;
-    sessionId: string;
+/** Atomically clone a tombstoned transcript and publish its linked successor. */
+export async function recoverSessionEntryFromRestartTombstone(
+  params: RestartTombstoneRecoveryInput & { commitGuard?: () => void; storePath: string },
+): Promise<RestartTombstoneRecoveryResult> {
+  const { commitGuard, storePath, ...requested } = params;
+  const input = structuredClone(requested);
+  const target = {
+    agentId: input.agentId,
+    storePath,
+    sessionKey: input.sourceTarget.canonicalKey,
+    env: { ...process.env },
   };
-  commitGuard?: () => void;
-  sourceTarget: { canonicalKey: string; storeKeys: readonly string[] };
-  storePath: string;
-  successorEntry: InternalSessionEntry & { sessionId: string };
-  successorTarget: { canonicalKey: string; storeKeys: readonly string[] };
-}): Promise<RestartTombstoneRecoveryResult> {
-  const resolved = resolveSqliteStoreScope(params.storePath, { agentId: params.agentId });
-  const sourceTarget = normalizeLifecycleTarget(params.sourceTarget);
-  const successorTarget = normalizeLifecycleTarget(params.successorTarget);
-  let result: RestartTombstoneRecoveryResult = {
-    status: "conflict",
-    reason: "source-changed",
-  };
-
-  const publish = await runExclusiveSqliteSessionWrite(
-    resolved,
+  const admission = isMainThread ? resolveSqliteWriteAdmissionScope(target) : undefined;
+  const scope = captureLifecycleDatabaseScope(
+    admission ??
+      (isMainThread
+        ? await prepareSqliteScope(target)
+        : resolveSqliteStoreScope(storePath, { agentId: input.agentId })),
+  );
+  return await runExclusiveSqliteSessionWrite(
+    scope,
     async () => {
-      return runOpenClawAgentWriteTransaction(
-        (database) => {
-          const source = resolveLifecyclePrimaryEntry(database, sourceTarget)?.entry as
-            | InternalSessionEntry
-            | undefined;
-          const recovery = source?.mainRestartRecovery;
-          const tombstone = recovery?.tombstone;
-          if (!source?.sessionId || !recovery || !tombstone) {
-            result = { status: "conflict", reason: "not-tombstoned" };
-            return undefined;
-          }
-
-          const recoveredSessionKey = tombstone.recoveredSessionKey;
-          const recoveredSessionId = tombstone.recoveredSessionId;
-          if (recoveredSessionKey || recoveredSessionId) {
-            if (!recoveredSessionKey || !recoveredSessionId) {
-              result = { status: "conflict", reason: "successor-missing" };
-              return undefined;
-            }
-            const linked = resolveLifecyclePrimaryEntry(
+      const resolved = admission ? await prepareSqliteScope({ ...target, env: scope.env }) : scope;
+      const options = { ...toDatabaseOptions(resolved), path: resolved.path ?? scope.path };
+      if (!isMainThread || !supportsOpenClawAgentDatabaseExecution(options)) {
+        // Process-held incognito and maintenance databases retain their native owner.
+        const diagnosticContext: {
+          sourceSessionId: string;
+          successorSessionId: string;
+          transcriptRows?: number;
+        } = {
+          sourceSessionId: input.expected.sessionId,
+          successorSessionId: input.successorEntry.sessionId,
+        };
+        const committed = runOpenClawAgentWriteTransaction(
+          (database) => {
+            const outcome = recoverRestartTombstoneInDatabase(
               database,
-              normalizeLifecycleTarget({
-                canonicalKey: recoveredSessionKey,
-                storeKeys: [recoveredSessionKey],
-              }),
-            )?.entry;
-            if (!linked || linked.sessionId !== recoveredSessionId) {
-              result = { status: "conflict", reason: "successor-missing" };
-              return undefined;
-            }
-            result = {
-              status: "existing",
-              sourceEntry: structuredClone(source),
-              successorEntry: structuredClone(linked),
-              successorKey: recoveredSessionKey,
+              resolved,
+              input,
+              () => commitGuard?.(),
+              diagnosticContext,
+            );
+            return {
+              result: outcome.result,
+              publish:
+                outcome.previous && outcome.current
+                  ? prepareSessionIdentityPublication(
+                      database,
+                      resolved.agentId,
+                      outcome.previous,
+                      outcome.current,
+                    )
+                  : undefined,
             };
-            return undefined;
+          },
+          options,
+          { operationLabel: "session.lifecycle.recover-tombstone", diagnosticContext },
+        );
+        committed.publish?.();
+        return committed.result;
+      }
+      let publication: ReturnType<typeof retainSessionEntryWorkerPublication> | undefined;
+      let databaseIdentity: string | undefined;
+      let admitted:
+        | {
+            admission: SqliteWorkerOperationAdmission;
+            retained: RetainedWorkerTransactionAdmission;
           }
-
-          if (
-            source.sessionId !== params.expected.sessionId ||
-            source.lifecycleRevision !== params.expected.lifecycleRevision ||
-            recovery.cycleId !== params.expected.cycleId ||
-            recovery.revision !== params.expected.revision ||
-            source.pluginOwnerId !== params.expected.pluginOwnerId
-          ) {
-            result = { status: "conflict", reason: "source-changed" };
-            return undefined;
-          }
-          if (resolveLifecyclePrimaryEntry(database, successorTarget)?.entry) {
-            result = { status: "conflict", reason: "target-exists" };
-            return undefined;
-          }
-
-          const sourceEvents = loadTranscriptEventsFromDatabase(database, source.sessionId);
-          const header = findSessionTranscriptHeader(sourceEvents);
-          if (!header) {
-            result = { status: "conflict", reason: "transcript-missing" };
-            return undefined;
-          }
-
-          const successorSessionId = params.successorEntry.sessionId;
-          const parentSession = formatLegacySqliteSessionMarkerForScope({
-            ...resolved,
-            sessionId: source.sessionId,
-            sessionKey: normalizeStoreSessionKey(sourceTarget.canonicalKey),
+        | undefined;
+      return await withSessionEntryWorker<RestartTombstoneRecoveryResult>(
+        options,
+        undefined,
+        () => commitGuard?.(),
+        async (execution, source) => {
+          const result = await execution.runExisting(source, async (worker) => {
+            databaseIdentity = execution.fileIdentity?.physicalIdentity;
+            if (!databaseIdentity) {
+              throw new Error("Session recovery requires its admitted database identity");
+            }
+            publication = retainSessionEntryWorkerPublication({
+              agentId: resolved.agentId,
+              storePath: options.path,
+              databaseIdentity,
+            });
+            const outcome = await worker
+              .execute({
+                type: "session.lifecycle.recover-tombstone",
+                input: { ...input, agentId: resolved.agentId },
+              })
+              .then(
+                (value) => ({ ok: true as const, value }),
+                (error: unknown) => ({ ok: false as const, error }),
+              );
+            let unknown = outcome.ok && outcome.value.status === "created" && !admitted;
+            if (admitted) {
+              await admitted.retained.settled;
+              const facts = admitted.admission.committed?.facts;
+              // The paired recovery kernel emits this existing metadata-only receipt.
+              const receipt =
+                isRecord(facts) && facts.kind === "session-entry-replacements"
+                  ? (facts as SessionEntryReplacementPublication)
+                  : undefined;
+              unknown = admitted.admission.settlement?.kind !== "completed" || !receipt;
+              const published = publication.settle(receipt, unknown);
+              if (published) {
+                publishCommittedSessionIdentity(
+                  resolved.agentId,
+                  databaseIdentity,
+                  published.previous,
+                  published.current,
+                );
+              }
+            }
+            if (unknown) {
+              throw new SqliteWorkerError(
+                "Session recovery has no confirmed native completion and commit receipt",
+                "outcome-unknown",
+              );
+            }
+            if (!outcome.ok) {
+              throw outcome.error;
+            }
+            return outcome.value;
           });
-          appendTranscriptEventsInTransaction(
-            database,
-            {
-              ...resolved,
-              sessionId: successorSessionId,
-              sessionKey: normalizeStoreSessionKey(successorTarget.canonicalKey),
-            },
-            [
-              {
-                ...createSessionTranscriptHeader({
-                  cwd: typeof header.cwd === "string" ? header.cwd : undefined,
-                  sessionId: successorSessionId,
-                  version: header.version ?? MIN_READABLE_SESSION_VERSION,
-                }),
-                parentSession,
-              },
-              ...sourceEvents.filter((event) => !(isRecord(event) && event.type === "session")),
-            ],
-          );
-
-          const now = Date.now();
-          const nextSource: InternalSessionEntry = {
-            ...source,
-            mainRestartRecovery: {
-              ...recovery,
-              revision: recovery.revision + 1,
-              tombstone: {
-                ...tombstone,
-                recoveredSessionId: successorSessionId,
-                recoveredSessionKey: successorTarget.canonicalKey,
-              },
-            },
-            archivedAt: source.archivedAt ?? now,
-            ...(source.archiveReason
-              ? { archiveReason: source.archiveReason }
-              : source.archivedAt === undefined
-                ? { archiveReason: "restart-recovery" as const }
-                : {}),
-            ...(source.archivedBy === undefined && params.archivedBy
-              ? { archivedBy: params.archivedBy }
-              : {}),
-            updatedAt: Math.max(now, (source.updatedAt ?? 0) + 1),
-          };
-          delete nextSource.pinnedAt;
-
-          params.commitGuard?.();
-
-          const identityKeys = [sourceTarget.canonicalKey, successorTarget.canonicalKey];
-          const previousIdentity = readSessionIdentitySnapshot(database, identityKeys);
-          writeSessionEntry(database, successorTarget.canonicalKey, params.successorEntry);
-          writeSessionEntry(database, sourceTarget.canonicalKey, nextSource, {
-            previousEntry: source,
-          });
-          const currentIdentity = readSessionIdentitySnapshot(database, identityKeys);
-          result = {
-            status: "created",
-            sourceEntry: structuredClone(nextSource),
-            successorEntry: structuredClone(params.successorEntry),
-            successorKey: successorTarget.canonicalKey,
-          };
-          return prepareSessionIdentityPublication(
-            database,
-            resolved.agentId,
-            previousIdentity,
-            currentIdentity,
-          );
+          return result ?? { status: "conflict", reason: "not-tombstoned" };
         },
-        toDatabaseOptions(resolved),
-        { operationLabel: "session.lifecycle.recover-tombstone" },
+        (grant, retained, facts) => {
+          if (isRecord(facts) && facts.publication !== undefined) {
+            if (
+              !isRecord(facts.publication) ||
+              facts.publication.kind !== "session-entry-replacements" ||
+              !Array.isArray(facts.publication.changedKeys) ||
+              !facts.publication.changedKeys.every((key): key is string => typeof key === "string")
+            ) {
+              throw new Error("Session recovery commit omitted its publication keys");
+            }
+            admitted = { admission: grant, retained };
+            publication?.begin(facts.publication.changedKeys, []);
+          }
+        },
       );
     },
     "session.restart.recover",
   );
-
-  publish?.();
-  return result;
 }

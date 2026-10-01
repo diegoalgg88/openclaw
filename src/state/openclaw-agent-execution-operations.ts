@@ -103,6 +103,56 @@ export async function loadAgentReplacementOperations() {
   } satisfies Handlers;
 }
 
+export async function loadAgentRecoveryOperations() {
+  const kernel = await import("../config/sessions/session-accessor.sqlite-recovery-kernel.js");
+  const { prepareSessionEntryReplacementPublication } =
+    await import("../config/sessions/session-accessor.sqlite-replacement-state.js");
+  return {
+    "session.lifecycle.recover-tombstone": (
+      input: Parameters<typeof kernel.recoverRestartTombstoneInDatabase>[2],
+      context,
+    ) => {
+      const diagnosticContext: {
+        sourceSessionId: string;
+        successorSessionId: string;
+        transcriptRows?: number;
+      } = {
+        sourceSessionId: input.expected.sessionId,
+        successorSessionId: input.successorEntry.sessionId,
+      };
+      return context.writeTransaction(
+        "session.lifecycle.recover-tombstone",
+        "Session recovery",
+        (current) => {
+          const committed = kernel.recoverRestartTombstoneInDatabase(
+            current,
+            { ...context.options, agentId: input.agentId },
+            input,
+            () => {},
+            diagnosticContext,
+          );
+          const publication =
+            committed.previous && committed.current
+              ? prepareSessionEntryReplacementPublication({
+                  previous: committed.previous,
+                  current: committed.current,
+                  pendingArchiveRecovery: false,
+                  membershipInvalidatedKeys: [],
+                  maintenancePlans: [],
+                })
+              : undefined;
+          if (publication) {
+            deferSqliteWorkerCommitReceipt(current.db, publication);
+          }
+          context.admit("commit", publication);
+          return committed.result;
+        },
+        diagnosticContext,
+      );
+    },
+  } satisfies Handlers;
+}
+
 export async function loadAgentEntryReadOperations() {
   const kernel = await import("../config/sessions/session-accessor.sqlite-entry-read.js");
   return {
@@ -224,6 +274,7 @@ export async function loadAgentArchivePruningOperations() {
 export type RegisteredAgentWorkerOperations = WorkerOperations<
   Awaited<ReturnType<typeof loadAgentTranscriptOperations>> &
     Awaited<ReturnType<typeof loadAgentReplacementOperations>> &
+    Awaited<ReturnType<typeof loadAgentRecoveryOperations>> &
     Awaited<ReturnType<typeof loadAgentEntryReadOperations>> &
     Awaited<ReturnType<typeof loadAgentTrajectoryOperations>> &
     Awaited<ReturnType<typeof loadAgentArchiveOperations>> &

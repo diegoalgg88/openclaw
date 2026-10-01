@@ -155,7 +155,7 @@ export function createOpenClawAgentDatabaseAdmissionOwner(
     options: OpenClawAgentDatabaseOptions,
     transactionOptions: Pick<
       SqliteTransactionOptions,
-      "busyTimeoutMs" | "operationLabel" | "slowTransactionHoldMs"
+      "busyTimeoutMs" | "operationLabel" | "slowTransactionHoldMs" | "diagnosticContext"
     > & { repairAdmission?: OpenClawAgentDatabaseRepairAdmission } = {},
   ): T {
     const { repairAdmission, ...writeOptions } = transactionOptions;

@@ -59,9 +59,9 @@ export function resolveAttemptSpawnWorkspaceDir(params: {
  * eligibility both allow it. The boolean result tells callers whether the
  * session transcript changed.
  */
-export function appendAttemptCacheTtlIfNeeded(params: {
+export async function appendAttemptCacheTtlIfNeeded(params: {
   sessionManager: {
-    appendCustomEntry?: (customType: string, data: unknown) => void;
+    appendCustomEntry?: (customType: string, data: unknown) => unknown;
   };
   timedOutDuringCompaction: boolean;
   compactionOccurredThisAttempt: boolean;
@@ -73,7 +73,7 @@ export function appendAttemptCacheTtlIfNeeded(params: {
   isCacheTtlEligibleProvider: typeof isCacheTtlEligibleProvider;
   now?: number;
   toolResultPromptProjectionState: ToolResultPromptProjectionState;
-}): boolean {
+}): Promise<boolean> {
   // Compaction and timeout attempts already rewrite the transcript boundary.
   if (
     params.timedOutDuringCompaction ||
@@ -91,7 +91,7 @@ export function appendAttemptCacheTtlIfNeeded(params: {
   if (params.sessionManager.appendCustomEntry) {
     const snapshot = serializeCacheTtlToolResultProjections(params.toolResultPromptProjectionState);
     const hash = hashToolResultProjectionSnapshot(snapshot);
-    params.sessionManager.appendCustomEntry(ATTEMPT_CACHE_TTL_CUSTOM_TYPE, {
+    await params.sessionManager.appendCustomEntry(ATTEMPT_CACHE_TTL_CUSTOM_TYPE, {
       timestamp: params.now ?? Date.now(),
       provider: params.provider,
       modelId: params.modelId,

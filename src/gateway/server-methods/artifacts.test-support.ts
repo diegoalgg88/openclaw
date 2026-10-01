@@ -7,11 +7,12 @@ type ArtifactListPayload = { artifacts?: Array<Record<string, unknown>> };
 
 export function withArtifactFixtureReader(
   actual: typeof import("../session-transcript-readers.js"),
-  visitSessionMessagesAsync: typeof actual.visitSessionMessagesAsync,
+  visitSessionMessagesAsync: ReturnType<
+    typeof import("../session-transcript-read-kernel.js").createSessionTranscriptReader
+  >["visitSessionMessagesAsync"],
 ) {
   return {
     ...actual,
-    visitSessionMessagesAsync,
     readSessionArtifacts: (
       scope: Parameters<typeof selectSessionArtifacts>[0],
       query: Parameters<typeof selectSessionArtifacts>[1],

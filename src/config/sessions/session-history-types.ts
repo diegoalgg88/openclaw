@@ -9,6 +9,10 @@ import type {
   ReadSessionMessagesResult,
   SessionTranscriptReader,
 } from "../../gateway/session-transcript-read-kernel.js";
+import type {
+  SessionTranscriptSummaryQuery,
+  SessionTranscriptSummaryResult,
+} from "../../gateway/session-transcript-summary.js";
 import type { AgentHistoryActivity } from "../../infra/agent-activity-events.js";
 import type { ConversationRecord } from "./conversation-registry.js";
 import type {
@@ -135,6 +139,10 @@ export type SessionConversationBinding = Pick<
 >;
 
 export type SessionHistoryWorkerRequest =
+  | {
+      kind: "summary";
+      params: { target: SessionTranscriptReadScope; query: SessionTranscriptSummaryQuery };
+    }
   | { kind: "reactions"; params: { target: SessionTranscriptReadScope } }
   | {
       kind: "conversation-binding";
@@ -206,6 +214,7 @@ export type SessionHistoryWorkerRequest =
   | { kind: "http"; params: SessionHistoryReadParams };
 
 export type SessionHistoryWorkerResult =
+  | { kind: "summary"; result: SessionTranscriptSummaryResult }
   | { kind: "reactions"; result: Record<string, StoredMessageReactionSummary[]> }
   | { kind: "conversation-binding"; result: SessionConversationBinding | null }
   | { kind: "artifacts"; result: SessionArtifactReadResult }

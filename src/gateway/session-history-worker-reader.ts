@@ -23,6 +23,15 @@ export async function readSessionHistoryRequest(
     deferProfileDisplay: true,
     resolveCronJobName: () => undefined,
   };
+  if (request.kind === "summary") {
+    return {
+      kind: "summary",
+      result: await options.readers.readSessionTranscriptSummaryAsync(
+        request.params.target,
+        request.params.query,
+      ),
+    };
+  }
   if (request.kind === "artifacts") {
     const { selectSessionArtifacts } = await import("./session-artifact-read.js");
     const query = request.params.query;

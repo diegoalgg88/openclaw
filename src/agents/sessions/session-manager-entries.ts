@@ -11,7 +11,7 @@ import { applyAssistantDeliveryDirectives } from "../../config/sessions/transcri
 import { sameSessionTranscriptTargetBinding } from "../../config/sessions/transcript-target-binding.js";
 import { isSessionTranscriptSideAppendEntry } from "../../config/sessions/transcript-tree.js";
 import { SessionTranscriptWriterClaimReboundError } from "../../config/sessions/transcript-write-context.js";
-import type { ImageContent, Message, TextContent } from "../../llm/types.js";
+import type { Message } from "../../llm/types.js";
 import { isIncognitoSessionKey } from "../../routing/session-key.js";
 import { readNestedToolActivity } from "../../sessions/nested-tool-activity.js";
 import { recordModelFallbackStop } from "../model-fallback-stop.js";
@@ -36,8 +36,6 @@ import type {
   AppendPersistenceOptions,
   BranchSummaryEntry,
   CompactionEntry,
-  CustomEntry,
-  CustomMessageEntry,
   LabelEntry,
   ResetEntry,
   ResetReason,
@@ -363,7 +361,7 @@ export class SessionManagerEntries extends SessionManagerSuffixPersistence {
       if (
         !admission ||
         isIncognitoSessionKey(this.persistenceTarget?.sessionKey) ||
-        (message.role !== "assistant" && message.role !== "toolResult") ||
+        message.role === "user" ||
         options?.beforeFreshMessageCommit
       ) {
         return this.appendMessageWithTranscriptAnchor(message, options);
@@ -406,7 +404,11 @@ export class SessionManagerEntries extends SessionManagerSuffixPersistence {
         {
           prepared,
           cwd: this.cwd,
-          validateTurn: activeBranchAppend,
+          validateTurn:
+            activeBranchAppend &&
+            (message.role === "assistant" ||
+              message.role === "toolResult" ||
+              readNestedToolActivity(canonical.message) !== undefined),
           idempotencyLookup: options?.idempotencyLookup,
         },
       );
@@ -544,19 +546,6 @@ export class SessionManagerEntries extends SessionManagerSuffixPersistence {
     return entry.id;
   }
 
-  appendCustomEntry(customType: string, data?: unknown): string {
-    const entry: CustomEntry = {
-      type: "custom",
-      customType,
-      data,
-      id: generateSessionEntryId(),
-      parentId: this.appendParentId,
-      timestamp: new Date().toISOString(),
-    };
-    this.appendEntry(entry, { invalidateSerializedPrefixCache: true });
-    return entry.id;
-  }
-
   appendSessionInfo(name: string): string {
     const entry: SessionInfoEntry = {
       type: "session_info",
@@ -566,26 +555,6 @@ export class SessionManagerEntries extends SessionManagerSuffixPersistence {
       name: name.replace(/[\r\n]+/g, " ").trim(),
     };
     this.appendEntry(entry);
-    return entry.id;
-  }
-
-  appendCustomMessageEntry(
-    customType: string,
-    content: string | (TextContent | ImageContent)[],
-    display: boolean,
-    details?: unknown,
-  ): string {
-    const entry: CustomMessageEntry = {
-      type: "custom_message",
-      customType,
-      content,
-      display,
-      details,
-      id: generateSessionEntryId(),
-      parentId: this.appendParentId,
-      timestamp: new Date().toISOString(),
-    };
-    this.appendEntry(entry, { invalidateSerializedPrefixCache: true });
     return entry.id;
   }
 

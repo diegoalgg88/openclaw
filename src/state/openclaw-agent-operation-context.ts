@@ -1,3 +1,4 @@
+import type { SqliteTransactionOptions } from "../infra/sqlite-transaction.js";
 import type {
   OpenClawAgentDatabase,
   OpenClawAgentDatabaseOptions,
@@ -11,5 +12,6 @@ export type AgentWorkerOperationContext = {
     operationLabel: string,
     owner: string,
     write: (current: OpenClawAgentDatabase) => T,
+    diagnosticContext?: SqliteTransactionOptions["diagnosticContext"],
   ) => T;
 };

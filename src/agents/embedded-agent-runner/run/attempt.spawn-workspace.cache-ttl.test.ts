@@ -5,9 +5,9 @@ import { appendAttemptCacheTtlIfNeeded } from "./attempt-thread-helpers.js";
 describe("runEmbeddedAttempt cache-ttl tracking after compaction", () => {
   it.each(["completed", "timed out", "none"])(
     "records cache continuity after compaction: %s",
-    (compaction) => {
+    async (compaction) => {
       const sessionManager = { appendCustomEntry: vi.fn() };
-      const appended = appendAttemptCacheTtlIfNeeded({
+      const appended = await appendAttemptCacheTtlIfNeeded({
         sessionManager,
         toolResultPromptProjectionState: createToolResultPromptProjectionState(),
         timedOutDuringCompaction: compaction === "timed out",

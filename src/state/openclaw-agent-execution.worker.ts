@@ -3,7 +3,10 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Result } from "@openclaw/normalization-core/result";
 import { createSqliteLifecycleAggregateError } from "../infra/sqlite-lifecycle-errors.js";
-import { assertTransactionUsable } from "../infra/sqlite-transaction.js";
+import {
+  assertTransactionUsable,
+  type SqliteTransactionOptions,
+} from "../infra/sqlite-transaction.js";
 import {
   SQLITE_WORKER_CLOSE_RECEIPT,
   SQLITE_WORKER_OPERATION_CLEANUP,
@@ -55,6 +58,7 @@ import {
 import {
   loadAgentTranscriptOperations,
   loadAgentReplacementOperations,
+  loadAgentRecoveryOperations,
   loadAgentEntryReadOperations,
   loadAgentTrajectoryOperations,
   loadAgentArchiveOperations,
@@ -329,6 +333,7 @@ function openAgentDatabaseBackend(
     operationLabel: string,
     owner: string,
     write: (current: OpenClawAgentDatabase) => T,
+    diagnosticContext?: SqliteTransactionOptions["diagnosticContext"],
   ): T => {
     const opened = openWriter();
     return runOpenClawAgentWriteTransaction(
@@ -340,7 +345,7 @@ function openAgentDatabaseBackend(
         return write(current);
       },
       options,
-      { operationLabel },
+      { operationLabel, diagnosticContext },
     );
   };
   const registry = createWorkerOperationRegistry<
@@ -354,6 +359,7 @@ function openAgentDatabaseBackend(
     "session.archives.recordPublication": loadAgentArchiveOperations,
     "session.transcript.initialize": loadAgentTranscriptOperations,
     "session.entries.replace": loadAgentReplacementOperations,
+    "session.lifecycle.recover-tombstone": loadAgentRecoveryOperations,
     "session.entry.acp": loadAgentAcpOperations,
     "session.providerReview.compare": loadAgentProviderReviewOperations,
     "session.reaction.set": loadAgentReactionOperations,

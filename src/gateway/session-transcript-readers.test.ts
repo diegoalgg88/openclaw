@@ -12,6 +12,7 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
+import { visitSessionMessagesAsync } from "./session-transcript-native.test-support.js";
 import {
   readRecentSessionMessagesWithStatsAsync,
   readSessionMessageByIdAsync,
@@ -19,7 +20,6 @@ import {
   readSessionMessagesAsync,
   readSessionMessagesAroundIdWithStatsAsync,
   readSessionMessagesPageWithStatsAsync,
-  visitSessionMessagesAsync,
   type SessionTranscriptReadScope,
 } from "./session-transcript-readers.js";
 import { readLatestSessionUsageFromTranscriptAsync } from "./session-transcript-usage.js";

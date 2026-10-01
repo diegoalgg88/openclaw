@@ -114,7 +114,9 @@ type AttemptSpawnWorkspaceHoisted = {
 
 type AttemptBaseMocks = Omit<AttemptSpawnWorkspaceHoisted, keyof ReturnType<typeof getSkillMocks>>;
 
-const hoisted = vi.hoisted((): AttemptBaseMocks => {
+const hoisted = await vi.hoisted(async (): Promise<AttemptBaseMocks> => {
+  const { createSessionManagerMocks } =
+    await import("./attempt-spawn-workspace.session-manager-mock.test-support.js");
   // Hoisted mocks must exist before the runner module graph is imported, because
   // runEmbeddedAttempt captures these dependencies at module load.
   const spawnSubagentDirectMock = vi.fn();
@@ -173,33 +175,7 @@ const hoisted = vi.hoisted((): AttemptBaseMocks => {
   const systemPromptTexts: string[] = [];
   const embeddedSystemPromptInputs: unknown[] = [];
   const trajectoryEvents: CapturedTrajectoryEvent[] = [];
-  const sessionManager = {
-    getSessionTarget: vi.fn(() => undefined),
-    getSessionId: vi.fn(() => "embedded-session"),
-    getAppendParentId: vi.fn<() => string | null>(() => null),
-    getHeader: vi.fn(() => ({ version: 3 })),
-    getLeafId: vi.fn<() => string | null>(() => null),
-    getLeafEntry: vi.fn(() => null),
-    getEntry: vi.fn(() => undefined),
-    getEntries: vi.fn(() => []),
-    getBranch: vi.fn(() => []),
-    getBoundaryCount: vi.fn(() => 0),
-    branch: vi.fn(),
-    resetLeaf: vi.fn(),
-    buildSessionContext: vi.fn<() => { messages: AgentMessage[] }>(() => ({ messages: [] })),
-    appendThinkingLevelChange: vi.fn(),
-    appendModelChange: vi.fn(),
-    appendCustomEntry: vi.fn(),
-    appendMessage: vi.fn(),
-    appendSessionInfo: vi.fn(),
-    appendLabelChange: vi.fn(),
-    flushPendingPersistence: vi.fn(),
-    flushPendingToolResults: vi.fn(),
-    clearPendingToolResults: vi.fn(),
-    reloadPersistedTranscript: vi.fn(),
-    clearNextUserMessagePersistenceSuppression: vi.fn(),
-    removeTrailingEntries: vi.fn(() => 0),
-  };
+  const sessionManager = createSessionManagerMocks();
   return {
     spawnSubagentDirectMock,
     createAgentSessionMock,

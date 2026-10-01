@@ -7,6 +7,7 @@ import {
   prepareSqliteQuerySync,
   prepareSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
+import { captureSqliteReaderOwner } from "../../infra/sqlite-reader-lifecycle.js";
 import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
@@ -337,10 +338,20 @@ export function readCurrentProjectionSnapshot<T>(
   resolved: CurrentTranscriptProjection["resolved"],
   read: (projection: CurrentTranscriptProjection) => T,
 ) {
+  const diagnostics: Record<string, string | number> = { sessionId: resolved.sessionId };
+  const readerOperation = captureSqliteReaderOwner()?.operation;
+  if (readerOperation) {
+    diagnostics.readerOperation = readerOperation;
+  }
   return runSqliteDeferredTransactionSync(
     database.db,
     () => {
       const snapshot = readProjectionSnapshot(database, resolved.sessionId);
+      if (snapshot.state) {
+        diagnostics.activeEvents = snapshot.state.activeEventCount;
+        diagnostics.activeMessages = snapshot.state.activeMessageCount;
+        diagnostics.indexedSeq = snapshot.state.indexedSeq;
+      }
       if (snapshot.cold) {
         throw new SessionTranscriptColdError(resolved.sessionId);
       }
@@ -367,6 +378,7 @@ export function readCurrentProjectionSnapshot<T>(
     {
       databaseLabel: database.path,
       operationLabel: "sessions.history.read",
+      diagnosticContext: diagnostics,
     },
   );
 }
