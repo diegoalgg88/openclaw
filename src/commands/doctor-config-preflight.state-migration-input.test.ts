@@ -122,11 +122,13 @@ describe("runDoctorConfigPreflight state migration input", () => {
 
     expect(autoMigrateLegacyState).toHaveBeenCalledWith({
       cfg: { gateway: { mode: "local", port: 19091 } },
+      sourceConfigBeforeMigrations: { gateway: { mode: "local", port: 19091 } },
       configIncludedPaths: [],
       env: process.env,
-      log: undefined,
       recoverCorruptTargetStore: true,
       doctorOnlyStateMigrations: undefined,
+      invocationPurpose: undefined,
+      beforeWorkspaceStateMigration: undefined,
       onStepReceipt: expect.any(Function),
     });
   });
@@ -204,12 +206,14 @@ describe("runDoctorConfigPreflight state migration input", () => {
     });
     expect(autoMigrateLegacyState).toHaveBeenCalledWith({
       cfg: expect.objectContaining(migratedConfig),
+      sourceConfigBeforeMigrations: resolvedConfig,
       pluginDoctorConfig: resolvedConfig,
       configIncludedPaths: includedPaths,
       env: process.env,
-      log: undefined,
       recoverCorruptTargetStore: undefined,
       doctorOnlyStateMigrations: undefined,
+      invocationPurpose: undefined,
+      beforeWorkspaceStateMigration: undefined,
       onStepReceipt: expect.any(Function),
     });
   });

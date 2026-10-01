@@ -125,7 +125,7 @@ it.for([0, 7_000])(
       const cfg = {
         agents: {
           defaults: { modelPolicy: { allow: [`${provider}/*`] } },
-          list: [{ id: "main", workspace: state.workspaceDir }],
+          entries: { main: { workspace: state.workspaceDir } },
         },
         plugins: { allow: [provider], load: { paths: [pluginPath] }, slots: { memory: "none" } },
         gateway: { mode: "local", auth: { mode: "token", token } },

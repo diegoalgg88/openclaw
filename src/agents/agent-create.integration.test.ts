@@ -8,6 +8,7 @@ import {
   createDeferred,
   withinTest,
 } from "../../test/helpers/promise.js";
+import { migrateLegacyConfig } from "../commands/doctor/shared/legacy-config-migrate.js";
 import { ensureOnboardingAgent } from "../commands/onboard-agent.js";
 import {
   mutateConfigFileWithRetry,
@@ -802,15 +803,21 @@ describe("agent roster persistence", () => {
     );
   });
 
-  it("replaces a legacy list with the complete keyed roster", async () => {
-    const persisted = await addWorkerToConfig({
+  it("extends the complete keyed roster after Doctor migrates a legacy list", async () => {
+    const legacy = {
       agents: {
         list: [
           { id: "main", default: true },
           { id: "ops", workspace: "/srv/ops" },
         ],
       },
-    });
+    };
+    const migrated = migrateLegacyConfig(legacy, { sourceConfigBeforeMigrations: legacy });
+    expect(migrated.config).not.toBeNull();
+    if (!migrated.config) {
+      throw new Error("Doctor did not migrate the legacy roster");
+    }
+    const persisted = await addWorkerToConfig(migrated.config);
 
     expect(persisted.agents).not.toHaveProperty("list");
     expect(persisted.agents?.entries?.main).toMatchObject({ workspace: expect.any(String) });
@@ -820,7 +827,7 @@ describe("agent roster persistence", () => {
     });
   });
 
-  it("preserves a legacy list byte-for-byte during a non-roster mutation", async () => {
+  it("refuses a non-roster mutation without changing an unmigrated legacy list", async () => {
     const state = await createOpenClawTestState({
       layout: "state-only",
       scenario: "empty",
@@ -832,16 +839,20 @@ describe("agent roster persistence", () => {
     ];
     try {
       await state.writeConfig({ agents: { list }, gateway: { port: 18789 } });
-      await mutateConfigFileWithRetry({
-        mutate: (config) => {
-          config.gateway = { ...config.gateway, port: 19001 };
-        },
-      });
+      const original = await fs.readFile(state.configPath, "utf8");
+      await expect(
+        mutateConfigFileWithRetry({
+          mutate: (config) => {
+            config.gateway = { ...config.gateway, port: 19001 };
+          },
+        }),
+      ).rejects.toThrow("doctor --fix");
 
+      expect(await fs.readFile(state.configPath, "utf8")).toBe(original);
       const persisted = JSON.parse(await fs.readFile(state.configPath, "utf8")) as OpenClawConfig;
       expect(JSON.stringify(persisted.agents?.list)).toBe(JSON.stringify(list));
       expect(persisted.agents).not.toHaveProperty("entries");
-      expect(persisted.gateway?.port).toBe(19001);
+      expect(persisted.gateway?.port).toBe(18789);
     } finally {
       closeOpenClawStateDatabaseForTest();
       await state.cleanup();

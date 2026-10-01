@@ -187,7 +187,7 @@ describe("retained session source verification", () => {
     async (history) => {
       await withOpenClawTestState({ label: "deferred-empty-index" }, async (state) => {
         openOpenClawStateDatabase({ env: state.env });
-        const cfg: OpenClawConfig = { agents: { entries: { main: { default: true } } } };
+        const cfg: OpenClawConfig = { agents: { entries: { main: {} } } };
         const directory = state.sessionsDir("main");
         fs.mkdirSync(directory, { recursive: true });
         const storePath = path.join(directory, "sessions.json");
@@ -313,7 +313,11 @@ describe("retained session source verification", () => {
         async (state) => {
           openOpenClawStateDatabase({ env: state.env });
           const cfg: OpenClawConfig = {
-            agents: { entries: { main: { default: true }, ops: {} } },
+            agents: {
+              ownership: "explicit",
+              defaults: { systemAgent: { agentId: "main" }, sessionStore: { agentId: "main" } },
+              entries: { main: {}, ops: {} },
+            },
             gateway: { mode: "local" },
           };
           const historyIds =
