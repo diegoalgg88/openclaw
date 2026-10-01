@@ -31,8 +31,8 @@ import { withinTest } from "../helpers/promise.js";
 import { runNodeScript } from "../helpers/run-node-script.js";
 import { createNestedGitEnv } from "../helpers/temp-repo.js";
 import {
-  materializeNativeCompiler,
   overrideNativeFixtureExecutable,
+  resolveInstalledNativeCompiler,
 } from "./native-boundary-fixture.js";
 import { preparedScriptWrapperEnv } from "./prepared-script-wrapper.test-support.js";
 import { toolingMtsEntrypoints } from "./tooling-mts-runtime.test-support.mts";
@@ -520,7 +520,7 @@ it.runIf(process.platform !== "win32")(
     lifetime.run(async () => {
       const sourceRoot = process.cwd();
       const root = fs.realpathSync(lifetime.createTempDir("openclaw-changed-types-"));
-      const native = materializeNativeCompiler(root);
+      const native = resolveInstalledNativeCompiler();
       const write = (name: string, content: string) => {
         const file = path.join(root, name);
         fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -574,20 +574,25 @@ it.runIf(process.platform !== "win32")(
           }),
         );
       }
-      fs.unlinkSync(path.join(root, "node_modules/.bin/tsgo"));
+      // Every boundary pass queries each graph config serially. Record and exec so
+      // each query stays one native process, as the production resolver launches it.
       const compiler = write(
         "node_modules/.bin/tsgo",
-        `#!/usr/bin/env node
-const fs=require('node:fs'),path=require('node:path'),{spawnSync}=require('node:child_process');
-const args=process.argv.slice(2);
-fs.appendFileSync(path.join(process.cwd(),'compiler-events.jsonl'),JSON.stringify(args)+'\\n');
-const result=spawnSync(${JSON.stringify(native)},args,{stdio:'inherit'});
-if(process.env.TSGO_FIXTURE_STDERR==='1') process.stderr.write('unclassified compiler failure\\n');
-process.exit(result.status??1);
+        `#!/bin/sh
+IFS=$(printf '\\t')
+printf '%s\\n' "$*" >> compiler-events.tsv
+if [ "$TSGO_FIXTURE_STDERR" = 1 ]; then echo 'unclassified compiler failure' >&2; fi
+exec ${JSON.stringify(native)} "$@"
 `,
       );
       fs.chmodSync(compiler, 0o755);
       overrideNativeFixtureExecutable(root, compiler);
+      const compilerEvents = () =>
+        fs
+          .readFileSync(path.join(root, "compiler-events.tsv"), "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.split("\t"));
       const driver = path.join(root, "scripts/run-tsgo-core-test-shards.mts");
       const preparedDriver = resolveRuntimeWorkerUrl(toolingMtsEntrypoints.tsgoCoreTestShards);
       const env = preparedScriptWrapperEnv(
@@ -616,7 +621,7 @@ process.exit(result.status??1);
         stripe?: string,
         expectedGraphListings = TSGO_CORE_GRAPHS.length,
       ) => {
-        write("compiler-events.jsonl", "");
+        write("compiler-events.tsv", "");
         const result = await lifetime.track(
           runNodeScript(
             [
@@ -631,12 +636,7 @@ process.exit(result.status??1);
             { cwd: root, signal, requireProcessTreeExit: true },
           ),
         );
-        const calls = fs
-          .readFileSync(path.join(root, "compiler-events.jsonl"), "utf8")
-          .trim()
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => JSON.parse(line) as string[]);
+        const calls = compilerEvents();
         expect(calls.filter((args) => args.includes("--listFilesOnly"))).toHaveLength(
           expectedGraphListings,
         );
@@ -687,7 +687,7 @@ if (process.argv[2] === "boundary") {
 `,
       );
       const inspectExtension = async (mode: "plan" | "boundary") => {
-        write("compiler-events.jsonl", "");
+        write("compiler-events.tsv", "");
         return await lifetime.track(
           runNodeScript(
             [
@@ -708,11 +708,7 @@ if (process.argv[2] === "boundary") {
         mode: "changed",
         names: ["extensions", "extensions-test", "scripts", "test-root"],
       });
-      const discovery = fs
-        .readFileSync(path.join(root, "compiler-events.jsonl"), "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as string[]);
+      const discovery = compilerEvents();
       expect(discovery).toHaveLength(4);
       expect(discovery.every((args) => args.includes("--listFilesOnly"))).toBe(true);
       // Its parallel owner must still reject a type-only edge into an extension.
@@ -789,7 +785,7 @@ if (process.argv[2] === "boundary") {
       write(leaf, "export const invalid: number = 'broken';\n");
       const selectedGraphs = ["core-test-agents-other", "core-test-agents-tools"];
       for (const mode of ["default", "evidence", "unknown"] as const) {
-        write("compiler-events.jsonl", "");
+        write("compiler-events.tsv", "");
         const result = await lifetime.track(
           runNodeScript(
             [
@@ -810,12 +806,7 @@ if (process.argv[2] === "boundary") {
         );
         expect(result.status, result.stderr).toBe(2);
         expect(result.stdout).toContain("leaf.test.ts(1,14): error TS2322");
-        const invocations = fs
-          .readFileSync(path.join(root, "compiler-events.jsonl"), "utf8")
-          .trim()
-          .split("\n")
-          .filter(Boolean);
-        expect(invocations).toHaveLength(mode === "evidence" ? 2 : 1);
+        expect(compilerEvents()).toHaveLength(mode === "evidence" ? 2 : 1);
         const receipts = result.stdout
           .split("\n")
           .filter((line) => line.startsWith("[ci-static:tsgo:"));
