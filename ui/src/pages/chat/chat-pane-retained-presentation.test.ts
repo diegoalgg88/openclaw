@@ -527,6 +527,8 @@ describe("chat pane retained presentation lifecycle", () => {
           path: "README.md",
           name: "README.md",
           missing: false,
+          previewKind: "text",
+          contentEncoding: "utf8",
           content: "This retired preview must not return.",
         },
       });
